@@ -855,6 +855,125 @@ input[type="range"]::-webkit-slider-thumb {
   .kb-tree-panel { display: none; }
   .kb-list-panel { border-radius: var(--radius) 0 0 var(--radius); }
 }
+/* ========== Auth Modal ========== */
+.auth-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(15,23,42,0.5);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.auth-overlay.show { opacity: 1; pointer-events: auto; }
+.auth-modal {
+  width: 380px; max-width: 90vw;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 32px;
+  transform: translateY(20px);
+  transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1);
+}
+.auth-overlay.show .auth-modal { transform: translateY(0); }
+.auth-modal h2 {
+  font-size: 22px; font-weight: 700;
+  margin-bottom: 4px;
+}
+.auth-modal .auth-subtitle {
+  font-size: 13px; color: var(--text-secondary);
+  margin-bottom: 24px;
+}
+.auth-tabs {
+  display: flex; gap: 0; margin-bottom: 20px;
+  background: var(--surface-alt);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+}
+.auth-tab {
+  flex: 1; text-align: center; padding: 8px;
+  font-size: 13px; font-weight: 500; color: var(--text-secondary);
+  border-radius: 6px; cursor: pointer;
+  transition: all 0.2s ease;
+}
+.auth-tab.active {
+  background: var(--surface); color: var(--text);
+  box-shadow: var(--shadow-xs);
+}
+.auth-field {
+  margin-bottom: 16px;
+}
+.auth-field label {
+  display: block; font-size: 12px; font-weight: 500;
+  color: var(--text-secondary); margin-bottom: 6px;
+}
+.auth-field input {
+  width: 100%; padding: 10px 12px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  transition: border-color 0.2s ease;
+}
+.auth-field input:focus {
+  border-color: var(--primary);
+}
+.auth-submit {
+  width: 100%; padding: 11px;
+  background: var(--primary);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  font-size: 14px; font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+.auth-submit:hover { background: var(--primary-dark); }
+.auth-submit:disabled { opacity: 0.6; cursor: default; }
+.auth-error {
+  color: var(--error); font-size: 12px;
+  margin-top: 8px; display: none;
+}
+.auth-error.show { display: block; }
+.auth-hint {
+  text-align: center; font-size: 12px;
+  color: var(--text-tertiary); margin-top: 16px;
+}
+
+/* ========== Sidebar User Area ========== */
+.sidebar-user {
+  margin-top: auto;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-light);
+  display: flex; align-items: center; gap: 10px;
+}
+.sidebar-user-info {
+  flex: 1; min-width: 0;
+}
+.sidebar-user-name {
+  font-size: 13px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sidebar-user-email {
+  font-size: 11px; color: var(--text-tertiary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sidebar-user-avatar {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700;
+  flex-shrink: 0;
+}
+.sidebar-login-btn {
+  width: 100%; padding: 8px;
+  font-size: 13px; font-weight: 500;
+  color: var(--primary);
+  background: var(--primary-light);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+.sidebar-login-btn:hover { background: #ddd6fe; }
 </style>
 </head>
 <body>
@@ -904,6 +1023,9 @@ input[type="range"]::-webkit-slider-thumb {
     <div class="nav-item" data-page="settings" onclick="switchPage('settings')">
       <span class="icon"><svg class="icon-svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1.08-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1.08 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001.08 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1.08z"/></svg></span><span>数据管理</span>
     </div>
+  </div>
+  <div class="sidebar-user" id="sidebar-user">
+    <button class="sidebar-login-btn" onclick="showAuthModal()">登录 / 注册</button>
   </div>
 </nav>
 
@@ -1271,7 +1393,7 @@ input[type="range"]::-webkit-slider-thumb {
       </div>
       <div class="settings-section">
         <h3><svg class="icon-svg" viewBox="0 0 24 24" style="color:var(--text-secondary)"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg> 关于</h3>
-        <p>TaskNote 个人自我管理系统 v1.0 — 灵感来自时序TaskNote，用纯前端技术实现。数据存储在浏览器 localStorage 中，完全离线可用，隐私安全。</p>
+        <p>TaskNote 个人自我管理系统 v2.0 — 支持账号登录与云端同步，不同用户数据隔离。未登录时数据保存在本地 localStorage，登录后自动同步至云端。</p>
       </div>
     </div>
 
@@ -1281,6 +1403,34 @@ input[type="range"]::-webkit-slider-thumb {
 <!-- Tooltip -->
 <div class="tooltip" id="tooltip"></div>
 
+<!-- Auth Modal -->
+<div class="auth-overlay" id="auth-overlay">
+  <div class="auth-modal">
+    <h2 id="auth-title">登录</h2>
+    <p class="auth-subtitle" id="auth-subtitle">登录后数据将在所有设备间同步</p>
+    <div class="auth-tabs">
+      <div class="auth-tab active" id="auth-tab-login" onclick="switchAuthTab('login')">登录</div>
+      <div class="auth-tab" id="auth-tab-register" onclick="switchAuthTab('register')">注册</div>
+    </div>
+    <div class="auth-field">
+      <label>邮箱</label>
+      <input type="email" id="auth-email" placeholder="you@example.com" autocomplete="email">
+    </div>
+    <div class="auth-field">
+      <label>密码</label>
+      <input type="password" id="auth-password" placeholder="至少 6 位" autocomplete="current-password">
+    </div>
+    <div class="auth-field" id="auth-confirm-field" style="display:none">
+      <label>确认密码</label>
+      <input type="password" id="auth-confirm" placeholder="再次输入密码" autocomplete="new-password">
+    </div>
+    <div class="auth-error" id="auth-error"></div>
+    <button class="auth-submit" id="auth-submit" onclick="handleAuth()">登录</button>
+    <p class="auth-hint" id="auth-hint">未登录也可使用，数据仅保存在本地浏览器</p>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 // ================================================================
 //  SVG ICON HELPERS
@@ -1308,6 +1458,17 @@ const ICONS = {
 const OKR_ICONS_KEYS = ['okr_target','okr_rocket','okr_bulb','okr_chart','okr_star','okr_trophy'];
 
 // ================================================================
+//  SUPABASE CONFIG
+// ================================================================
+const SUPABASE_URL = 'https://pvnhxijfvjidfudqvyzl.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2bmh4aWpmdmppZGZ1ZHF2eXpsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU1OTE5NjIsImV4cCI6MjEwMTE2Nzk2Mn0.jVbhFo7FnPSTv5dZLcT7gJLLUaL0Vd7uh8y7llwEo5M';
+let supa = null;
+let currentUser = null;
+let saveTimer = null;
+
+try { supa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); } catch(e) { console.warn('Supabase init failed:', e); }
+
+// ================================================================
 //  DATA LAYER
 // ================================================================
 const STORAGE_KEY = 'tasknote_data';
@@ -1324,7 +1485,6 @@ function loadData() {
       if (!d.categories) d.categories = [];
       d.notes.forEach(n => { if (n.pinned === undefined) n.pinned = false; if (n.starred === undefined) n.starred = false; if (n.categoryId === undefined) n.categoryId = null; });
     d.todos.forEach(t => {
-      // Migrate old quadrant/priority to flag system (1=high,2=mid,3=low,4=none)
       if (t.flag === undefined) {
         if (t.urgent && t.important) t.flag = 1;
         else if (t.urgent || t.important) t.flag = 2;
@@ -1339,10 +1499,175 @@ function loadData() {
   return getDefaultData();
 }
 
-function saveData() { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
+function saveData() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  if (currentUser && supa) {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      try {
+        await supa.from('user_data').upsert({
+          user_id: currentUser.id,
+          data: data,
+          updated_at: new Date().toISOString()
+        });
+      } catch(e) { console.warn('Cloud save failed:', e); }
+    }, 800);
+  }
+}
 
 let data = loadData();
 function genId() { return data.nextId++; }
+
+// ================================================================
+//  AUTH
+// ================================================================
+let authMode = 'login';
+
+async function loadCloudData() {
+  if (!supa || !currentUser) return null;
+  try {
+    const { data: row, error } = await supa.from('user_data')
+      .select('data').eq('user_id', currentUser.id).single();
+    if (error && error.code !== 'PGRST116') throw error;
+    return row ? row.data : null;
+  } catch(e) { console.warn('Cloud load failed:', e); return null; }
+}
+
+async function syncLocalToCloud() {
+  if (!supa || !currentUser) return;
+  try {
+    const localData = loadData();
+    const cloudData = await loadCloudData();
+    if (!cloudData) {
+      await supa.from('user_data').upsert({
+        user_id: currentUser.id,
+        data: localData,
+        updated_at: new Date().toISOString()
+      });
+      return localData;
+    }
+    return cloudData;
+  } catch(e) { console.warn('Sync failed:', e); return null; }
+}
+
+function showAuthModal() {
+  document.getElementById('auth-overlay').classList.add('show');
+  setTimeout(() => document.getElementById('auth-email').focus(), 100);
+}
+
+function hideAuthModal() {
+  document.getElementById('auth-overlay').classList.remove('show');
+  document.getElementById('auth-error').classList.remove('show');
+}
+
+function switchAuthTab(mode) {
+  authMode = mode;
+  const isLogin = mode === 'login';
+  document.getElementById('auth-tab-login').classList.toggle('active', isLogin);
+  document.getElementById('auth-tab-register').classList.toggle('active', !isLogin);
+  document.getElementById('auth-title').textContent = isLogin ? '登录' : '注册';
+  document.getElementById('auth-subtitle').textContent = isLogin ? '登录后数据将在所有设备间同步' : '注册新账号，开启云端同步';
+  document.getElementById('auth-confirm-field').style.display = isLogin ? 'none' : 'block';
+  document.getElementById('auth-submit').textContent = isLogin ? '登录' : '注册';
+  document.getElementById('auth-error').classList.remove('show');
+}
+
+async function handleAuth() {
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  const errEl = document.getElementById('auth-error');
+  const btn = document.getElementById('auth-submit');
+  
+  if (!email || !password) { errEl.textContent = '请填写邮箱和密码'; errEl.classList.add('show'); return; }
+  if (password.length < 6) { errEl.textContent = '密码至少 6 位'; errEl.classList.add('show'); return; }
+  
+  if (authMode === 'register') {
+    const confirm = document.getElementById('auth-confirm').value;
+    if (password !== confirm) { errEl.textContent = '两次密码不一致'; errEl.classList.add('show'); return; }
+  }
+  
+  btn.disabled = true; btn.textContent = '处理中…';
+  errEl.classList.remove('show');
+  
+  try {
+    let result;
+    if (authMode === 'login') {
+      result = await supa.auth.signInWithPassword({ email, password });
+    } else {
+      result = await supa.auth.signUp({ email, password });
+      if (result.data.user && !result.data.session) {
+        errEl.textContent = '注册成功！请检查邮箱验证后登录。';
+        errEl.style.color = 'var(--success)'; errEl.classList.add('show');
+        btn.disabled = false; btn.textContent = '注册';
+        return;
+      }
+    }
+    if (result.error) throw result.error;
+    hideAuthModal();
+  } catch(e) {
+    errEl.textContent = e.message || '操作失败'; errEl.style.color = ''; errEl.classList.add('show');
+  }
+  btn.disabled = false; btn.textContent = authMode === 'login' ? '登录' : '注册';
+}
+
+async function handleLogout() {
+  if (!confirm('确认登出？登出后数据将保存在本地。')) return;
+  await supa.auth.signOut();
+}
+
+function updateSidebarUser() {
+  const el = document.getElementById('sidebar-user');
+  if (currentUser) {
+    const email = currentUser.email || '';
+    const name = email.split('@')[0] || '用户';
+    const initial = name.charAt(0).toUpperCase();
+    el.innerHTML = `
+      <div class="sidebar-user-avatar">${initial}</div>
+      <div class="sidebar-user-info">
+        <div class="sidebar-user-name">${name}</div>
+        <div class="sidebar-user-email">${email}</div>
+      </div>
+      <button class="btn btn-sm btn-ghost" onclick="handleLogout()" title="登出" style="color:var(--text-tertiary);padding:4px 8px">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>`;
+  } else {
+    el.innerHTML = '<button class="sidebar-login-btn" onclick="showAuthModal()">登录 / 注册</button>';
+  }
+}
+
+async function onAuthChange(event, session) {
+  const wasLoggedIn = !!currentUser;
+  currentUser = session?.user || null;
+  
+  if (currentUser) {
+    if (!wasLoggedIn) {
+      const cloudData = await syncLocalToCloud();
+      if (cloudData) {
+        data = cloudData;
+        if (!data.categories) data.categories = [];
+      }
+    }
+  } else {
+    if (wasLoggedIn) {
+      data = loadData();
+    }
+  }
+  updateSidebarUser();
+  renderDashboard();
+}
+
+// Close auth modal on overlay click
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('auth-overlay').addEventListener('click', (e) => {
+    if (e.target.id === 'auth-overlay') hideAuthModal();
+  });
+  document.getElementById('auth-password').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && authMode === 'login') handleAuth();
+  });
+  document.getElementById('auth-confirm').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleAuth();
+  });
+});
 
 // ================================================================
 //  UTILS
@@ -2434,11 +2759,33 @@ function hideTooltip() { document.getElementById('tooltip').style.display = 'non
 // ================================================================
 //  INIT
 // ================================================================
-function init() {
+// ================================================================
+//  INIT
+// ================================================================
+async function init() {
   const now = new Date();
   const wd = ['日','一','二','三','四','五','六'];
   document.getElementById('topbar-date').textContent = `${now.getFullYear()}年${now.getMonth()+1}月${now.getDate()}日 星期${wd[now.getDay()]}`;
   initCalendar(); initHeatmap(); initDatePicker(); updateBadge(); renderDashboard();
+  
+  // Setup Supabase auth
+  if (supa) {
+    supa.auth.onAuthStateChange((event, session) => {
+      onAuthChange(event, session);
+    });
+    // Check existing session
+    const { data: { session } } = await supa.auth.getSession();
+    if (session) {
+      currentUser = session.user;
+      const cloudData = await loadCloudData();
+      if (cloudData) {
+        data = cloudData;
+        if (!data.categories) data.categories = [];
+        renderDashboard();
+      }
+    }
+    updateSidebarUser();
+  }
 }
 
 init();
