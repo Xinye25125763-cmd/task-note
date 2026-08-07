@@ -782,13 +782,23 @@ function addTodo() {
     date: todoDate, time: dpSelectedTime || null,
     done: false, createdAt: new Date().toISOString()
   });
-  data.heatmap[todayStr] = (data.heatmap[todayStr]||0) + 1;
   saveData(); input.value = ''; selectFlag(4); dpClear(); renderTodos(); updateBadge();
 }
 
 function toggleTodo(id) {
-  const t = data.todos.find(t => t.id === id);
-  if (t) { t.done = !t.done; saveData(); renderTodos(); updateBadge(); }
+const t = data.todos.find(t => t.id === id);
+if (t) {
+  const wasDone = t.done;
+  t.done = !t.done;
+  // 热力图基于完成任务计数：完成时 +1，取消完成时 -1
+  const dateKey = t.date || today();
+  if (t.done && !wasDone) {
+    data.heatmap[dateKey] = (data.heatmap[dateKey] || 0) + 1;
+  } else if (!t.done && wasDone) {
+    data.heatmap[dateKey] = Math.max(0, (data.heatmap[dateKey] || 0) - 1);
+  }
+  saveData(); renderTodos(); updateBadge();
+}
 }
 
 function deleteTodo(id) {
@@ -972,7 +982,7 @@ function renderHeatmap() {
     if (d.getFullYear()!==heatmapYear || d > now) {
       html += '<div class="heatmap-cell" style="background:transparent;cursor:default"></div>';
     } else {
-      html += `<div class="heatmap-cell level-${lv}" onmouseenter="showTooltip(event,'${ds}: ${count} 个任务')" onmouseleave="hideTooltip()"></div>`;
+      html += `<div class="heatmap-cell level-${lv}" onmouseenter="showTooltip(event,'${ds}: 完成 ${count} 项')" onmouseleave="hideTooltip()"></div>`;
     }
     if ((d.getDay()+6)%7 === 6) html += '</div>';
     d.setDate(d.getDate()+1);
@@ -988,7 +998,7 @@ function renderHeatmap() {
   while(true) { const sds=formatDate(sd); if (sd.getFullYear()!==heatmapYear&&streak>0) break; if ((data.heatmap[sds]||0)>0){streak++;sd.setDate(sd.getDate()-1);}else break; }
 
   let statsHtml = `
-    <div class="heatmap-stat"><div class="hstat-value">${total}</div><div class="hstat-label">全年任务</div></div>
+    <div class="heatmap-stat"><div class="hstat-value">${total}</div><div class="hstat-label">全年完成</div></div>
     <div class="heatmap-stat"><div class="hstat-value">${activeDays}</div><div class="hstat-label">活跃天数</div></div>
     <div class="heatmap-stat"><div class="hstat-value">${maxDay}</div><div class="hstat-label">单日最高</div></div>
     <div class="heatmap-stat"><div class="hstat-value">${streak}</div><div class="hstat-label">当前连续</div></div>`;
