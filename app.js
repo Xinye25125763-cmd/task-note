@@ -449,29 +449,55 @@ function renderDashboard() {
 
   const allDone = doneTodos.length === todayTodos.length && todayTodos.length > 0;
 
+  // Calculate yesterday's data for trend comparison
+  const yStr = (() => { const y = new Date(); y.setDate(y.getDate()-1); return formatDate(y); })();
+  const yTodos = data.todos.filter(t => t.date === yStr);
+  const yDone = yTodos.filter(t => t.done).length;
+  const todayDoneCount = doneTodos.length;
+
   document.getElementById('stats-grid').innerHTML = `
-    <div class="stat-card">
-      <div class="stat-icon" style="background:${allDone ? 'var(--success-light);color:var(--success)' : 'var(--primary-light);color:var(--primary)'}">
-        ${allDone ? ICONS.party : ICONS.clipboard}
+    <div class="stat-card" data-theme="${allDone ? 'success' : 'indigo'}">
+      <canvas class="particle-canvas"></canvas>
+      <div class="card-glare"></div>
+      <div class="stat-content">
+        <div class="stat-icon">${allDone ? ICONS.party : ICONS.clipboard}</div>
+        <div class="stat-value">${doneTodos.length}/${todayTodos.length}</div>
+        <div class="stat-label">今日完成</div>
+        ${todayDoneCount > yDone ? '<div class="stat-trend"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/></svg> 超越昨天</div>' : ''}
       </div>
-      <div class="stat-value">${doneTodos.length}/${todayTodos.length}</div>
-      <div class="stat-label">今日完成</div>
     </div>
-    <div class="stat-card">
-      <div class="stat-icon" style="background:var(--warning-light);color:var(--warning)">${ICONS.pin}</div>
-      <div class="stat-value">${totalPending}</div>
-      <div class="stat-label">待办总数</div>
+    <div class="stat-card" data-theme="amber">
+      <canvas class="particle-canvas"></canvas>
+      <div class="card-glare"></div>
+      <div class="stat-content">
+        <div class="stat-icon">${ICONS.pin}</div>
+        <div class="stat-value">${totalPending}</div>
+        <div class="stat-label">待办总数</div>
+        ${totalPending === 0 ? '<div class="stat-trend">🎉 清空！</div>' : totalPending <= 3 ? '<div class="stat-trend">就差一点</div>' : ''}
+      </div>
     </div>
-    <div class="stat-card">
-      <div class="stat-icon" style="background:var(--success-light);color:var(--success)">${ICONS.zap}</div>
-      <div class="stat-value">${streak}</div>
-      <div class="stat-label">连续打卡</div>
+    <div class="stat-card" data-theme="emerald">
+      <canvas class="particle-canvas"></canvas>
+      <div class="card-glare"></div>
+      <div class="stat-content">
+        <div class="stat-icon">${ICONS.zap}</div>
+        <div class="stat-value">${streak}</div>
+        <div class="stat-label">连续打卡</div>
+        ${streak >= 7 ? '<div class="stat-trend">🔥 一周达成</div>' : streak >= 3 ? '<div class="stat-trend">💪 坚持中</div>' : ''}
+      </div>
     </div>
-    <div class="stat-card">
-      <div class="stat-icon" style="background:var(--primary-light);color:var(--primary)">${ICONS.book}</div>
-      <div class="stat-value">${data.notes.length}</div>
-      <div class="stat-label">知识笔记</div>
+    <div class="stat-card" data-theme="violet">
+      <canvas class="particle-canvas"></canvas>
+      <div class="card-glare"></div>
+      <div class="stat-content">
+        <div class="stat-icon">${ICONS.book}</div>
+        <div class="stat-value">${data.notes.length}</div>
+        <div class="stat-label">知识笔记</div>
+      </div>
     </div>`;
+
+  // Initialize 3D particle effects for stat cards
+  initParticleCards();
 
   // Today todos preview
   const el = document.getElementById('today-todos');
@@ -1500,6 +1526,148 @@ function showTooltip(event, text) {
   tip.style.left = event.clientX + 12 + 'px'; tip.style.top = event.clientY - 8 + 'px';
 }
 function hideTooltip() { document.getElementById('tooltip').style.display = 'none'; }
+
+// ================================================================
+//  3D PARTICLE CARD SYSTEM
+// ================================================================
+const PARTICLE_COLORS = {
+  indigo: ['rgba(255,255,255,0.6)', 'rgba(199,210,254,0.5)', 'rgba(165,180,252,0.4)'],
+  amber:  ['rgba(255,255,255,0.6)', 'rgba(253,230,138,0.5)', 'rgba(252,211,77,0.4)'],
+  emerald:['rgba(255,255,255,0.6)', 'rgba(167,243,208,0.5)', 'rgba(110,231,183,0.4)'],
+  violet: ['rgba(255,255,255,0.6)', 'rgba(221,214,254,0.5)', 'rgba(196,181,253,0.4)'],
+  success:['rgba(255,255,255,0.6)', 'rgba(167,243,208,0.5)', 'rgba(52,211,153,0.4)']
+};
+
+function initParticleCards() {
+  const cards = document.querySelectorAll('.stat-card[data-theme]');
+  cards.forEach(card => {
+    const canvas = card.querySelector('canvas.particle-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const theme = card.dataset.theme;
+    const colors = PARTICLE_COLORS[theme] || PARTICLE_COLORS.indigo;
+
+    // Resize canvas to card size
+    const resize = () => {
+      const rect = card.getBoundingClientRect();
+      canvas.width = rect.width * window.devicePixelRatio;
+      canvas.height = rect.height * window.devicePixelRatio;
+      ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    };
+    resize();
+
+    // Create particles
+    const particles = [];
+    const count = 30;
+    const rect = card.getBoundingClientRect();
+    for (let i = 0; i < count; i++) {
+      particles.push({
+        x: Math.random() * rect.width,
+        y: Math.random() * rect.height,
+        r: Math.random() * 3 + 1,
+        vx: (Math.random() - 0.5) * 0.5,
+        vy: (Math.random() - 0.5) * 0.5,
+        color: colors[Math.floor(Math.random() * colors.length)],
+        phase: Math.random() * Math.PI * 2
+      });
+    }
+
+    // Mouse tracking for 3D tilt + glare + particle attraction
+    let mouseX = 0.5, mouseY = 0.5, isHovering = false;
+    const glare = card.querySelector('.card-glare');
+
+    card.addEventListener('mousemove', e => {
+      const r = card.getBoundingClientRect();
+      mouseX = (e.clientX - r.left) / r.width;
+      mouseY = (e.clientY - r.top) / r.height;
+      isHovering = true;
+
+      // 3D tilt
+      const rotateY = (mouseX - 0.5) * 20;
+      const rotateX = -(mouseY - 0.5) * 20;
+      card.style.transform = `perspective(800px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) scale(1.04)`;
+
+      // Glare follows mouse
+      if (glare) {
+        glare.style.setProperty('--glare-x', (mouseX * 100) + '%');
+        glare.style.setProperty('--glare-y', (mouseY * 100) + '%');
+      }
+    });
+
+    card.addEventListener('mouseleave', () => {
+      isHovering = false;
+      card.style.transform = '';
+    });
+
+    // Animation loop
+    let animId;
+    let time = 0;
+    function animate() {
+      time += 0.016;
+      const r = card.getBoundingClientRect();
+      ctx.clearRect(0, 0, r.width, r.height);
+
+      particles.forEach(p => {
+        // Fluid-like movement
+        p.x += p.vx + Math.sin(time + p.phase) * 0.3;
+        p.y += p.vy + Math.cos(time * 0.7 + p.phase) * 0.2;
+
+        // Mouse attraction when hovering
+        if (isHovering) {
+          const dx = mouseX * r.width - p.x;
+          const dy = mouseY * r.height - p.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 100) {
+            p.x += dx * 0.015;
+            p.y += dy * 0.015;
+          }
+        }
+
+        // Wrap around edges
+        if (p.x < -5) p.x = r.width + 5;
+        if (p.x > r.width + 5) p.x = -5;
+        if (p.y < -5) p.y = r.height + 5;
+        if (p.y > r.height + 5) p.y = -5;
+
+        // Draw particle with glow
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.fill();
+
+        // Draw connection lines between nearby particles
+        particles.forEach(p2 => {
+          if (p === p2) return;
+          const dx = p.x - p2.x;
+          const dy = p.y - p2.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 60) {
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.strokeStyle = `rgba(255,255,255,${0.15 * (1 - dist / 60)})`;
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+          }
+        });
+      });
+
+      animId = requestAnimationFrame(animate);
+    }
+
+    // Only animate when card is visible (IntersectionObserver)
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) { if (!animId) animate(); }
+        else { cancelAnimationFrame(animId); animId = null; }
+      });
+    }, { threshold: 0.1 });
+    observer.observe(card);
+
+    // Store cleanup reference
+    card._particleCleanup = () => { cancelAnimationFrame(animId); observer.disconnect(); };
+  });
+}
 
 // ================================================================
 //  INIT

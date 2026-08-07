@@ -222,22 +222,100 @@ position: sticky; top: 0; z-index: 50;
   to { opacity: 1; transform: translateY(0); }
 }
 
-/* ========== Stats ========== */
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 18px; margin-bottom: 28px; }
+/* ========== Stats — 3D Particle Cards ========== */
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px; margin-bottom: 28px;
+  perspective: 800px;
+}
 .stat-card {
-background: var(--surface); border-radius: var(--radius);
-padding: 22px 24px; box-shadow: var(--shadow-sm); border: 1px solid var(--border-light);
-transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
+  position: relative; overflow: hidden;
+  border-radius: var(--radius-lg); padding: 28px 26px;
+  border: 1px solid rgba(255,255,255,0.15);
+  transition: transform 0.4s cubic-bezier(0.03,0.98,0.52,0.99), box-shadow 0.4s ease;
+  transform-style: preserve-3d; will-change: transform;
+  cursor: default;
 }
-.stat-card:hover { box-shadow: var(--shadow-md); transform: translateY(-3px) scale(1.01); border-color: rgba(99,102,241,0.2); }
+/* Per-card theme colors via data-theme attribute */
+.stat-card[data-theme="indigo"] {
+  background: linear-gradient(135deg, #6366f1 0%, #818cf8 50%, #a5b4fc 100%);
+  box-shadow: 0 4px 20px rgba(99,102,241,0.3);
+  color: #fff;
+}
+.stat-card[data-theme="amber"] {
+  background: linear-gradient(135deg, #f59e0b 0%, #fbbf24 50%, #fcd34d 100%);
+  box-shadow: 0 4px 20px rgba(245,158,11,0.3);
+  color: #fff;
+}
+.stat-card[data-theme="emerald"] {
+  background: linear-gradient(135deg, #10b981 0%, #34d399 50%, #6ee7b7 100%);
+  box-shadow: 0 4px 20px rgba(16,185,129,0.3);
+  color: #fff;
+}
+.stat-card[data-theme="violet"] {
+  background: linear-gradient(135deg, #8b5cf6 0%, #a78bfa 50%, #c4b5fd 100%);
+  box-shadow: 0 4px 20px rgba(139,92,246,0.3);
+  color: #fff;
+}
+/* All-done celebration variant */
+.stat-card[data-theme="success"] {
+  background: linear-gradient(135deg, #059669 0%, #10b981 50%, #34d399 100%);
+  box-shadow: 0 4px 20px rgba(5,150,105,0.3);
+  color: #fff;
+}
+
+.stat-card:hover {
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+  z-index: 2;
+}
+
+/* Particle canvas overlay */
+.stat-card canvas.particle-canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; opacity: 0.5;
+  z-index: 0;
+}
+
+/* Shine / glare effect on hover */
+.stat-card .card-glare {
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at var(--glare-x, 50%) var(--glare-y, 50%),
+    rgba(255,255,255,0.25) 0%, transparent 60%);
+  opacity: 0; transition: opacity 0.3s ease;
+  pointer-events: none; z-index: 1;
+}
+.stat-card:hover .card-glare { opacity: 1; }
+
+/* Content layer above canvas */
+.stat-card .stat-content {
+  position: relative; z-index: 2;
+}
+
 .stat-card .stat-icon {
-  width: 44px; height: 44px; border-radius: var(--radius-sm);
+  width: 48px; height: 48px; border-radius: var(--radius);
   display: flex; align-items: center; justify-content: center;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
+  background: rgba(255,255,255,0.2);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
 }
-.stat-card .stat-icon svg { width: 22px; height: 22px; }
-.stat-card .stat-value { font-size: 30px; font-weight: 800; line-height: 1.1; letter-spacing: -0.02em; }
-.stat-card .stat-label { font-size: 13px; color: var(--text-secondary); margin-top: 4px; font-weight: 500; }
+.stat-card .stat-icon svg { width: 22px; height: 22px; stroke: #fff; }
+.stat-card .stat-value {
+  font-size: 34px; font-weight: 800; line-height: 1.1;
+  letter-spacing: -0.03em; text-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+.stat-card .stat-label {
+  font-size: 13px; margin-top: 4px; font-weight: 600;
+  opacity: 0.85; letter-spacing: 0.01em;
+}
+.stat-card .stat-trend {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 700; margin-top: 8px;
+  padding: 3px 8px; border-radius: 20px;
+  background: rgba(255,255,255,0.2);
+  backdrop-filter: blur(4px);
+}
+.stat-card .stat-trend svg { width: 12px; height: 12px; }
 
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 
