@@ -1,0 +1,7 @@
+project_id = "task-note"
+
+[functions.manage-push-subscription]
+verify_jwt = true
+
+[functions.send-task-reminders]
+verify_jwt = false

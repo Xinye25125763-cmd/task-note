@@ -33,6 +33,7 @@ const SUPABASE_URL = 'https://guplutkrbjsauqijdiia.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_fOjUcHdm0cugFPulbcxGHw_wZ5JtUjV';
 let supa = null;
 let currentUser = null;
+let cloudSyncUserId = null;
 let saveTimer = null;
 let localSaveTimer = null;
 let cloudWriteQueue = Promise.resolve();
@@ -52,7 +53,7 @@ try {
 //  DATA LAYER
 // ================================================================
 const STORAGE_KEY = 'tasknote_data';
-const DATA_VERSION = 2; // Increment when schema changes; migration runs on load
+const DATA_VERSION = 3; // Increment when schema changes; migration runs on load
 let localDataLoadError = null;
 let localDataOriginalRaw = null;
 
@@ -161,6 +162,9 @@ function migrateData(d) {
     });
   }
 
+  // v2 → v3: add optional reminder and recurrence fields to todos.
+  if (v < 3) migrated.todos = migrated.todos.map(TaskFeatures.normalizeTodoV3);
+
   // Keep optional containers and fields safe for renderers across old backups.
   if (!migrated.categories) migrated.categories = [];
   if (!migrated.heatmap) migrated.heatmap = {};
@@ -171,6 +175,7 @@ function migrateData(d) {
     if (note.starred === undefined) note.starred = false;
     if (note.categoryId === undefined) note.categoryId = null;
   });
+  migrated.todos = migrated.todos.map(TaskFeatures.normalizeTodoV3);
   let maxId = 0;
   [...migrated.todos, ...migrated.okrs, ...migrated.notes, ...migrated.categories].forEach(item => {
     maxId = Math.max(maxId, item.id);
@@ -178,7 +183,7 @@ function migrateData(d) {
   });
   if (!Number.isSafeInteger(migrated.nextId) || migrated.nextId <= maxId) migrated.nextId = maxId + 1;
 
-  // Future migrations: if (v < 3) { ... }
+  // Future migrations: if (v < 4) { ... }
 
   migrated.version = DATA_VERSION;
   return migrated;
@@ -534,6 +539,8 @@ async function syncCurrentUser() {
   if (completedSyncUserId === userId) return { ok: true, alreadySynced: true };
 
   activeSyncUserId = userId;
+  cloudSyncUserId = null;
+  void refreshBackgroundReminderUi();
   const syncPromise = (async () => {
     syncResolutionPending = true;
     showSyncLoading(true);
@@ -550,9 +557,12 @@ async function syncCurrentUser() {
       return { ok: false, stale: true };
     }
     if (!syncResult?.ok) {
+      cloudSyncUserId = null;
+      completedSyncUserId = null;
       showSyncLoading(false);
       showSyncIndicator(false, '同步失败');
       showToast('云端核对未完成，同步已暂停；重新登录后可以重试', 'error', 6000);
+      void refreshBackgroundReminderUi();
       return { ok: false };
     }
 
@@ -560,18 +570,23 @@ async function syncCurrentUser() {
     if (!syncResult.localPersisted) {
       const localResult = writeLocalNow(data);
       if (!localResult.ok) {
+        cloudSyncUserId = null;
+        completedSyncUserId = null;
         showSyncLoading(false);
         showSyncIndicator(false, '本地保存失败');
         showToast('云端数据已读取，但写入本地失败，请检查浏览器存储空间', 'error', 5000);
+        void refreshBackgroundReminderUi();
         return { ok: false, error: localResult.error };
       }
     }
 
     syncResolutionPending = false;
-    completedSyncUserId = userId;
+    cloudSyncUserId = syncResult.cloudOk === false ? null : userId;
+    completedSyncUserId = cloudSyncUserId;
     showSyncLoading(false);
     showSyncIndicator(false, syncResult.cloudOk === false ? '同步失败' : null);
     renderDashboard();
+    void refreshBackgroundReminderUi();
     return { ok: syncResult.cloudOk !== false, cloudOk: syncResult.cloudOk };
   })();
   activeSyncPromise = syncPromise;
@@ -659,6 +674,18 @@ async function handleLogout() {
       showToast('本地保存失败，已取消登出以保护当前数据', 'error', 5000);
       return;
     }
+    const pushCleanupPromise = PushClient.disable({
+      navigatorRef: navigator,
+      supabaseClient: supa,
+      userId: currentUser?.id || null
+    });
+    const pushCleanup = await Promise.race([
+      pushCleanupPromise,
+      new Promise(resolve => setTimeout(() => resolve({ localRemoved: true, serverRemoved: false }), 2500))
+    ]);
+    if (pushCleanup.localRemoved && !pushCleanup.serverRemoved) {
+      showToast('登出前已关闭本机通知；服务器解绑未确认', 'info', 5000);
+    }
     signOutAlreadyFlushed = true;
     const { error } = await supa.auth.signOut();
     if (error) throw error;
@@ -724,12 +751,27 @@ async function onAuthChange(event, session) {
     flushResult = await flushSave();
   }
 
+  if (previousUser?.id && (!nextUser?.id || accountChanged)) {
+    const pushCleanup = await PushClient.disableForAuthChange({
+      navigatorRef: navigator,
+      supabaseClient: supa,
+      previousUserId: previousUser.id,
+      nextUserId: nextUser?.id || null
+    });
+    if (!pushCleanup.serverRemoved) {
+      console.warn('Could not remove the previous account push subscription:', pushCleanup.serverError || pushCleanup.error);
+      showToast('账号状态已变化，但旧账号的设备提醒解绑未确认', 'warning', 6000);
+    }
+  }
+
   if (accountChanged || (!previousUser && nextUser && flushResult?.local === false)) {
     // Do not let one account's in-memory data flow into a newly authenticated
     // account if the transition could not be persisted safely.
     currentUser = null;
+    cloudSyncUserId = null;
     completedSyncUserId = null;
     updateSidebarUser();
+    void refreshBackgroundReminderUi();
     renderDashboard();
     showToast('账号切换前的数据未能安全保存，请先检查存储后再登录', 'error', 6000);
     try {
@@ -743,20 +785,156 @@ async function onAuthChange(event, session) {
 
   currentUser = nextUser;
   if (!nextUser) {
+    cloudSyncUserId = null;
     completedSyncUserId = null;
     syncResolutionPending = false;
     if (previousUser && flushResult?.local !== false) data = loadData();
     if (previousUser) showToast('已退出登录', 'info');
   } else if (!previousUser || accountChanged) {
+    cloudSyncUserId = null;
     completedSyncUserId = null;
     showToast('正在同步数据…', 'info');
   }
 
   updateSidebarUser();
+  void refreshBackgroundReminderUi();
   renderDashboard();
   if (nextUser && (!previousUser || accountChanged)) {
     const result = await syncCurrentUser();
     if (result.ok) showToast('数据同步完成', 'success');
+  }
+}
+
+let pushUiRevision = 0;
+let pushActionBusy = false;
+
+function pushStatusMessage(state, hasSubscription = false) {
+  if (state === 'insecure') return '网页推送需要 HTTPS 安全连接；本机 localhost 也可用于测试。';
+  if (state === 'unsupported') return '当前浏览器或设备不支持网页推送通知。';
+  if (state === 'signed_out') return hasSubscription
+    ? '当前未登录。此设备已有本地订阅；登录后可同步移除服务器记录。'
+    : '请先登录并完成云端同步，再开启本设备提醒。';
+  if (state === 'sync_needed') return '请等待云端数据同步完成后，再开启本设备提醒。';
+  if (state === 'denied') return '浏览器已拒绝通知权限。请到本网站的浏览器通知设置中允许后再试。';
+  if (state === 'permission_needed') return '本设备尚未授权通知。点击开启后，浏览器会询问是否允许。';
+  if (state === 'not_enabled') return '浏览器通知权限已允许，本设备的后台提醒尚未开启。';
+  if (state === 'checking') return '正在确认此设备与提醒服务的连接…';
+  if (state === 'service_error') return '本机已有通知订阅，但服务器尚未确认。请确认推送服务已部署后重试。';
+  if (state === 'enabled') return '本设备后台提醒已开启。推送只包含通用提示，不会包含待办文字。';
+  return '正在检查此设备的通知能力…';
+}
+
+function setPushReminderStatus(state, message, { canEnable = false, hasSubscription = false } = {}) {
+  const status = document.getElementById('push-reminder-status');
+  const text = document.getElementById('push-reminder-status-text');
+  const enable = document.getElementById('push-reminder-enable');
+  const disable = document.getElementById('push-reminder-disable');
+  if (!status || !text || !enable || !disable) return;
+  status.dataset.state = state;
+  text.textContent = message || pushStatusMessage(state, hasSubscription);
+  enable.disabled = !canEnable || pushActionBusy;
+  enable.textContent = state === 'service_error' ? '重试连接提醒服务' : state === 'enabled' ? '本设备已开启' : '开启本设备提醒';
+  disable.hidden = !hasSubscription;
+  disable.disabled = pushActionBusy;
+}
+
+function pushCapabilityState(hasSubscription) {
+  return PushClient.getStatus({
+    secureContext: !!window.isSecureContext,
+    serviceWorkerSupported: !!navigator.serviceWorker,
+    pushManagerSupported: typeof window.PushManager !== 'undefined',
+    notificationSupported: typeof Notification !== 'undefined' && typeof Notification.requestPermission === 'function',
+    permission: typeof Notification !== 'undefined' ? Notification.permission : 'unsupported',
+    userId: currentUser?.id || null,
+    cloudSyncReady: !!currentUser && cloudSyncUserId === currentUser.id,
+    hasSubscription
+  });
+}
+
+async function getLocalPushSubscription() {
+  if (!navigator.serviceWorker?.getRegistration || typeof window.PushManager === 'undefined') return null;
+  const registration = await navigator.serviceWorker.getRegistration();
+  return registration?.pushManager?.getSubscription?.() || null;
+}
+
+async function refreshBackgroundReminderUi() {
+  const status = document.getElementById('push-reminder-status');
+  if (!status) return;
+  const revision = ++pushUiRevision;
+  let subscription = null;
+  try { subscription = await getLocalPushSubscription(); }
+  catch (error) { console.warn('Could not inspect local push subscription:', error); }
+  if (revision !== pushUiRevision) return;
+
+  const capability = pushCapabilityState(!!subscription);
+  if (capability.state === 'enabled') {
+    setPushReminderStatus('checking', pushStatusMessage('checking'), { canEnable: false, hasSubscription: true });
+    try {
+      await PushClient.syncSubscription({ supabaseClient: supa, subscription });
+      if (revision !== pushUiRevision) return;
+      setPushReminderStatus('enabled', pushStatusMessage('enabled'), { canEnable: false, hasSubscription: true });
+    } catch (error) {
+      console.warn('Push subscription is not confirmed by the server:', error?.code || error?.message || 'unknown error');
+      if (revision !== pushUiRevision) return;
+      setPushReminderStatus('service_error', pushStatusMessage('service_error'), { canEnable: true, hasSubscription: true });
+    }
+    return;
+  }
+
+  const canEnable = capability.state === 'permission_needed' || capability.state === 'not_enabled';
+  setPushReminderStatus(capability.state, pushStatusMessage(capability.state, !!subscription), {
+    canEnable,
+    hasSubscription: !!subscription
+  });
+}
+
+async function enableBackgroundReminders() {
+  if (pushActionBusy) return;
+  pushActionBusy = true;
+  setPushReminderStatus('checking', pushStatusMessage('checking'));
+  try {
+    const result = await PushClient.enable({
+      navigatorRef: navigator,
+      notificationRef: typeof Notification === 'undefined' ? null : Notification,
+      supabaseClient: supa,
+      userId: currentUser?.id || null,
+      cloudSyncReady: !!currentUser && cloudSyncUserId === currentUser.id,
+      secureContext: !!window.isSecureContext,
+      pushManagerSupported: typeof window.PushManager !== 'undefined',
+      serviceWorkerSupported: !!navigator.serviceWorker
+    });
+    if (result.ok) showToast('本设备提醒已开启', 'success');
+    else if (result.state === 'denied') showToast('请在浏览器网站设置中允许通知后再试', 'error', 5000);
+    else if (result.state === 'service_error') showToast('提醒服务尚未就绪，请确认服务器配置后重试', 'error', 5000);
+    else showToast(pushStatusMessage(result.state), 'info', 4000);
+  } finally {
+    pushActionBusy = false;
+    await refreshBackgroundReminderUi();
+  }
+}
+
+async function disableBackgroundReminders({ quiet = false } = {}) {
+  if (pushActionBusy) return { ok: false };
+  pushActionBusy = true;
+  try {
+    const result = await PushClient.disable({
+      navigatorRef: navigator,
+      supabaseClient: supa,
+      userId: currentUser?.id || null
+    });
+    if (!quiet) {
+      if (result.localRemoved && result.serverRemoved) showToast('已关闭本设备提醒', 'success');
+      else if (result.localRemoved) showToast('已关闭本机订阅；服务器解绑未确认，重新登录后可重试', 'info', 5000);
+      else showToast('关闭提醒失败，请重试', 'error', 5000);
+    }
+    return result;
+  } catch (error) {
+    console.warn('Could not disable background reminders:', error);
+    if (!quiet) showToast('关闭提醒失败，请重试', 'error', 5000);
+    return { ok: false, error };
+  } finally {
+    pushActionBusy = false;
+    await refreshBackgroundReminderUi();
   }
 }
 
@@ -770,6 +948,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('auth-confirm').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') handleAuth();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void refreshBackgroundReminderUi();
   });
 });
 
@@ -895,6 +1076,7 @@ if (page === 'calendar') renderCalendar();
 if (page === 'heatmap') renderHeatmap();
 if (page === 'okr') renderOkrs();
 if (page === 'knowledge') renderNotes();
+if (page === 'settings') void refreshBackgroundReminderUi();
 // Close sidebar on mobile
 if (window.innerWidth <= 768) closeSidebar();
 // Scroll content to top
@@ -1058,15 +1240,45 @@ function selectFlag(f) {
 let dpYear, dpMonth; // datepicker calendar state
 let dpSelectedDate = null; // selected date string 'YYYY-MM-DD'
 let dpSelectedTime = null; // selected time string 'HH:mm' or null
+let dpReminderMinutes = null;
+let dpRepeatRule = null;
+let dpDraftDate = null;
+let dpDraftTime = null;
+let dpDraftReminderMinutes = null;
+let dpDraftRepeatRule = null;
 let dpPeriodStart = null;
 let dpPeriodEnd = null;
+let dpDraftPeriodStart = null;
+let dpDraftPeriodEnd = null;
 let dpCurrentTab = 'date';
+let dpEditingTodoId = null;
 
 function initDatePicker() {
   const n = new Date();
-  dpYear = n.getFullYear();
-  dpMonth = n.getMonth();
+  dpDraftDate = dpSelectedDate;
+  dpDraftTime = dpSelectedTime;
+  dpDraftReminderMinutes = dpReminderMinutes;
+  dpDraftRepeatRule = dpRepeatRule;
+  dpDraftPeriodStart = dpPeriodStart;
+  dpDraftPeriodEnd = dpPeriodEnd;
+  const selectedParts = dpDraftDate ? dpDraftDate.split('-') : null;
+  dpYear = selectedParts ? +selectedParts[0] : n.getFullYear();
+  dpMonth = selectedParts ? +selectedParts[1] - 1 : n.getMonth();
+  syncDatePickerControls();
   updateDateBtnDay();
+}
+
+function syncDatePickerControls() {
+  const time = document.getElementById('dp-time-input');
+  const reminder = document.getElementById('dp-reminder-select');
+  const repeat = document.getElementById('dp-repeat-select');
+  if (time) time.value = dpDraftTime || '';
+  if (reminder) {
+    reminder.value = dpDraftReminderMinutes === null ? '' : String(dpDraftReminderMinutes);
+    reminder.disabled = !dpDraftTime;
+    reminder.title = dpDraftTime ? '' : '请先设置截止时间';
+  }
+  if (repeat) repeat.value = dpDraftRepeatRule || '';
 }
 
 function updateDateBtnDay() {
@@ -1077,6 +1289,12 @@ function updateDateBtnDay() {
 function toggleDatePicker(e) {
   e && e.stopPropagation();
   const dp = document.getElementById('todo-datepicker');
+  dpEditingTodoId = null;
+  dp.classList.remove('edit-mode');
+  dp.style.top = '';
+  dp.style.left = '';
+  dp.style.right = '';
+  dp.style.transform = '';
   const isOpen = dp.classList.toggle('open');
   if (isOpen) {
     // Close flag popover if open
@@ -1084,6 +1302,42 @@ function toggleDatePicker(e) {
     initDatePicker();
     renderDpCalendar();
   }
+}
+
+function openTodoScheduleEditor(id, event) {
+  event && event.stopPropagation();
+  const todo = data.todos.find(item => String(item.id) === String(id));
+  const picker = document.getElementById('todo-datepicker');
+  if (!todo || !picker) return;
+
+  dpEditingTodoId = String(todo.id);
+  dpDraftDate = isValidTodoDate(todo.date) ? todo.date : today();
+  dpDraftTime = isValidTodoTime(todo.time) ? todo.time : null;
+  dpDraftReminderMinutes = dpDraftTime ? TaskFeatures.parseReminderMinutes(todo.reminderMinutes) : null;
+  dpDraftRepeatRule = ['daily', 'weekly', 'monthly'].includes(todo.repeat) ? todo.repeat : null;
+  dpDraftPeriodStart = null;
+  dpDraftPeriodEnd = null;
+  const selectedParts = dpDraftDate.split('-');
+  dpYear = +selectedParts[0];
+  dpMonth = +selectedParts[1] - 1;
+  dpCurrentTab = 'date';
+  document.querySelectorAll('.dp-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.tab === 'date'));
+  document.getElementById('dp-tab-date').style.display = '';
+  document.getElementById('dp-tab-period').style.display = 'none';
+  syncDatePickerControls();
+  renderDpCalendar();
+  document.getElementById('flag-popover').classList.remove('open');
+  picker.classList.add('open', 'edit-mode');
+}
+
+function closeDatePicker() {
+  const picker = document.getElementById('todo-datepicker');
+  picker.classList.remove('open', 'edit-mode');
+  picker.style.top = '';
+  picker.style.left = '';
+  picker.style.right = '';
+  picker.style.transform = '';
+  dpEditingTodoId = null;
 }
 
 function switchDpTab(tab) {
@@ -1094,10 +1348,10 @@ function switchDpTab(tab) {
   if (tab === 'period') {
     // Pre-fill period inputs
     const todayStr = today();
-    if (!dpPeriodStart) document.getElementById('dp-period-start').value = todayStr;
-    else document.getElementById('dp-period-start').value = dpPeriodStart;
-    if (!dpPeriodEnd) document.getElementById('dp-period-end').value = todayStr;
-    else document.getElementById('dp-period-end').value = dpPeriodEnd;
+    if (!dpDraftPeriodStart) document.getElementById('dp-period-start').value = todayStr;
+    else document.getElementById('dp-period-start').value = dpDraftPeriodStart;
+    if (!dpDraftPeriodEnd) document.getElementById('dp-period-end').value = todayStr;
+    else document.getElementById('dp-period-end').value = dpDraftPeriodEnd;
   }
 }
 
@@ -1119,30 +1373,30 @@ function dpShortcut(type) {
   const n = new Date();
   switch (type) {
     case 'today':
-      dpSelectedDate = formatDate(n);
+      dpDraftDate = formatDate(n);
       break;
     case 'tomorrow': {
       const t = new Date(n); t.setDate(t.getDate() + 1);
-      dpSelectedDate = formatDate(t);
+      dpDraftDate = formatDate(t);
       break;
     }
     case 'nextweek': {
       const t = new Date(n); t.setDate(t.getDate() + (8 - t.getDay()) % 7 || 7);
-      dpSelectedDate = formatDate(t);
+      dpDraftDate = formatDate(t);
       break;
     }
     case 'evening':
-      dpSelectedDate = formatDate(n);
-      dpSelectedTime = '20:00';
-      document.getElementById('dp-time-value').textContent = '20:00';
+      dpDraftDate = formatDate(n);
+      dpDraftTime = '20:00';
       break;
   }
   // Navigate calendar to selected month
-  if (dpSelectedDate) {
-    const parts = dpSelectedDate.split('-');
+  if (dpDraftDate) {
+    const parts = dpDraftDate.split('-');
     dpYear = +parts[0];
     dpMonth = +parts[1] - 1;
   }
+  syncDatePickerControls();
   renderDpCalendar();
   // Update shortcut highlight
   document.querySelectorAll('.dp-shortcut').forEach(el => el.classList.remove('active'));
@@ -1163,7 +1417,7 @@ function renderDpCalendar() {
   for (let i = startWd - 1; i >= 0; i--) {
     const d = prevLast.getDate() - i;
     const ds = formatDate(new Date(dpYear, dpMonth - 1, d));
-    const sel = ds === dpSelectedDate ? ' selected' : '';
+    const sel = ds === dpDraftDate ? ' selected' : '';
     html += `<button class="dp-day other-month${sel}" onclick="dpSelectDay('${ds}')">${d}</button>`;
   }
   // Current month days
@@ -1171,7 +1425,7 @@ function renderDpCalendar() {
     const ds = formatDate(new Date(dpYear, dpMonth, d));
     let cls = 'dp-day';
     if (ds === todayStr) cls += ' today';
-    if (ds === dpSelectedDate) cls += ' selected';
+    if (ds === dpDraftDate) cls += ' selected';
     html += `<button class="${cls}" onclick="dpSelectDay('${ds}')">${d}</button>`;
   }
   // Next month padding
@@ -1179,47 +1433,120 @@ function renderDpCalendar() {
   const rem = total % 7 === 0 ? 0 : 7 - (total % 7);
   for (let d = 1; d <= rem; d++) {
     const ds = formatDate(new Date(dpYear, dpMonth + 1, d));
-    const sel = ds === dpSelectedDate ? ' selected' : '';
+    const sel = ds === dpDraftDate ? ' selected' : '';
     html += `<button class="dp-day other-month${sel}" onclick="dpSelectDay('${ds}')">${d}</button>`;
   }
   container.innerHTML = html;
 }
 
 function dpSelectDay(dateStr) {
-  dpSelectedDate = dateStr;
+  dpDraftDate = dateStr;
   renderDpCalendar();
 }
 
-function toggleDpTimeInput() {
-  const el = document.getElementById('dp-time-value');
-  if (dpSelectedTime) {
-    // Clear time
-    dpSelectedTime = null;
-    el.textContent = '';
-  } else {
-    // Set default time
-    dpSelectedTime = '09:00';
-    el.textContent = '09:00';
-  }
+function updateDpTime(value) {
+  dpDraftTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : null;
+  if (!dpDraftTime) dpDraftReminderMinutes = null;
+  syncDatePickerControls();
+}
+
+function updateDpReminder(value) {
+  const parsed = value === '' || !dpDraftTime ? null : TaskFeatures.parseReminderMinutes(Number(value));
+  dpDraftReminderMinutes = parsed;
+  syncDatePickerControls();
+}
+
+function updateDpRepeat(value) {
+  dpDraftRepeatRule = ['daily', 'weekly', 'monthly'].includes(value) ? value : null;
+  syncDatePickerControls();
 }
 
 function dpClear() {
+  if (dpEditingTodoId !== null) {
+    const todo = data.todos.find(item => String(item.id) === dpEditingTodoId);
+    if (todo) {
+      const updated = TaskFeatures.updateTodoSchedule(todo, {
+        date: today(), time: null, reminderMinutes: null, repeat: null,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      }, null);
+      if (updated) {
+        Object.assign(todo, updated);
+        data.todos = data.todos.filter(item => !(String(item.generatedFrom) === String(todo.id) && !item.done));
+        saveData();
+        renderTodos();
+        updateBadge();
+      }
+    }
+    closeDatePicker();
+    return;
+  }
+
   dpSelectedDate = null;
   dpSelectedTime = null;
+  dpReminderMinutes = null;
+  dpRepeatRule = null;
+  dpDraftDate = null;
+  dpDraftTime = null;
+  dpDraftReminderMinutes = null;
+  dpDraftRepeatRule = null;
   dpPeriodStart = null;
   dpPeriodEnd = null;
-  document.getElementById('dp-time-value').textContent = '';
+  dpDraftPeriodStart = null;
+  dpDraftPeriodEnd = null;
+  syncDatePickerControls();
   document.getElementById('todo-date-btn').classList.remove('has-date');
-  document.getElementById('todo-datepicker').classList.remove('open');
+  closeDatePicker();
   renderDpCalendar();
+}
+
+function dpCancel() {
+  const picker = document.getElementById('todo-datepicker');
+  if (!picker.classList.contains('open')) return;
+  closeDatePicker();
+  syncDatePickerControls();
 }
 
 function dpConfirm() {
   if (dpCurrentTab === 'period') {
-    dpPeriodStart = document.getElementById('dp-period-start').value;
-    dpPeriodEnd = document.getElementById('dp-period-end').value;
-    if (dpPeriodStart) dpSelectedDate = dpPeriodStart;
+    dpDraftPeriodStart = document.getElementById('dp-period-start').value;
+    dpDraftPeriodEnd = document.getElementById('dp-period-end').value;
+    if (dpDraftPeriodStart) dpDraftDate = dpDraftPeriodStart;
   }
+
+  if (dpEditingTodoId !== null) {
+    const todo = data.todos.find(item => String(item.id) === dpEditingTodoId);
+    if (todo) {
+      const repeatChanged = todo.repeat !== dpDraftRepeatRule || todo.date !== dpDraftDate;
+      const needsNewSeries = dpDraftRepeatRule && (
+        todo.repeat !== dpDraftRepeatRule || todo.date !== dpDraftDate || !todo.seriesId
+      );
+      const updated = TaskFeatures.updateTodoSchedule(todo, {
+        date: dpDraftDate || today(),
+        time: dpDraftTime,
+        reminderMinutes: dpDraftReminderMinutes,
+        repeat: dpDraftRepeatRule,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      }, needsNewSeries ? `series-${todo.id}-${genId()}` : null);
+      if (updated) {
+        Object.assign(todo, updated);
+        if (repeatChanged || !updated.repeat) {
+          data.todos = data.todos.filter(item => !(String(item.generatedFrom) === String(todo.id) && !item.done));
+        }
+        saveData();
+        renderTodos();
+        updateBadge();
+      }
+    }
+    closeDatePicker();
+    return;
+  }
+
+  dpSelectedDate = dpDraftDate;
+  dpSelectedTime = dpDraftTime;
+  dpReminderMinutes = dpDraftReminderMinutes;
+  dpRepeatRule = dpDraftRepeatRule;
+  dpPeriodStart = dpDraftPeriodStart;
+  dpPeriodEnd = dpDraftPeriodEnd;
   // Update button appearance
   const btn = document.getElementById('todo-date-btn');
   if (dpSelectedDate) {
@@ -1227,15 +1554,25 @@ function dpConfirm() {
   } else {
     btn.classList.remove('has-date');
   }
-  document.getElementById('todo-datepicker').classList.remove('open');
+  closeDatePicker();
 }
 
 // Close popovers on outside click
+function clickIsInsideTodoInput(event) {
+  const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+  if (path.some(node => node && node.nodeType === 1 && node.matches('.todo-input-wrap, #todo-datepicker, .todo-schedule-edit'))) return true;
+  return Boolean(event.target && event.target.closest && event.target.closest('.todo-input-wrap, #todo-datepicker, .todo-schedule-edit'));
+}
+
 document.addEventListener('click', e => {
 const pop = document.getElementById('flag-popover');
 const dp = document.getElementById('todo-datepicker');
-if (pop && !e.target.closest('.todo-input-wrap')) pop.classList.remove('open');
-if (dp && !e.target.closest('.todo-input-wrap')) dp.classList.remove('open');
+const insideTodoInput = clickIsInsideTodoInput(e);
+if (pop && !insideTodoInput) pop.classList.remove('open');
+if (dp && dp.classList.contains('open') && !insideTodoInput) dpCancel();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') dpCancel();
 });
 
 function addTodo() {
@@ -1244,9 +1581,26 @@ function addTodo() {
   if (!text) return;
   const todayStr = today();
   const todoDate = dpSelectedDate || todayStr;
+  const id = genId();
+  const repeat = dpRepeatRule;
+  const reminderMinutes = dpSelectedTime ? TaskFeatures.parseReminderMinutes(dpReminderMinutes) : null;
+  const timeZone = repeat || reminderMinutes !== null
+    ? (Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
+    : null;
+  const seriesId = repeat ? `series-${id}` : null;
   data.todos.push({
-    id: genId(), text, flag: currentFlag,
+    id, text, flag: currentFlag,
     date: todoDate, time: dpSelectedTime || null,
+    reminderMinutes,
+    reminderId: reminderMinutes !== null ? `todo-${id}-reminder` : null,
+    repeat,
+    seriesId,
+    seriesStartDate: repeat ? todoDate : null,
+    seriesIndex: repeat ? 0 : null,
+    repeatAnchorDay: repeat ? Number(todoDate.slice(-2)) : null,
+    occurrenceKey: repeat ? `${seriesId}:0` : null,
+    generatedFrom: null,
+    timeZone,
     done: false, createdAt: new Date().toISOString()
   });
   saveData(); input.value = ''; selectFlag(4); dpClear(); renderTodos(); updateBadge();
@@ -1261,8 +1615,12 @@ if (t) {
   const dateKey = t.date || today();
   if (t.done && !wasDone) {
     data.heatmap[dateKey] = (data.heatmap[dateKey] || 0) + 1;
+    const next = TaskFeatures.createNextOccurrence(t, data.todos, new Date(), genId);
+    if (next) data.todos.push(next);
   } else if (!t.done && wasDone) {
     data.heatmap[dateKey] = Math.max(0, (data.heatmap[dateKey] || 0) - 1);
+    const sourceId = String(t.id);
+    data.todos = data.todos.filter(todo => !(todo.generatedFrom === sourceId && !todo.done));
   }
   saveData(); renderTodos(); updateBadge();
 }
@@ -1318,6 +1676,9 @@ function renderTodoItem(t) {
     <span class="todo-meta">
       ${dateLabel}${timeLabel}
     </span>
+    <button class="todo-schedule-edit" type="button" onclick="openTodoScheduleEditor(${t.id}, event)" title="编辑日期、提醒和重复规则" aria-label="编辑日期、提醒和重复规则">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4H5a2 2 0 00-2 2v13a2 2 0 002 2h13a2 2 0 002-2v-6"/><path d="M16 3.5a2.1 2.1 0 013 3L11 14.5 7 15.5l1-4 8-8z"/></svg>
+    </button>
     <button class="todo-delete" onclick="deleteTodo(${t.id})">×</button>
   </div>`;
 }
@@ -2272,6 +2633,7 @@ async function init() {
     }
     updateSidebarUser();
   }
+  void refreshBackgroundReminderUi();
   showReloadNotice();
 }
 

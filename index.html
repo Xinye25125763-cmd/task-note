@@ -184,23 +184,35 @@
                   </div>
                   <div class="dp-days" id="dp-days"></div>
                   <div class="dp-options">
-                    <div class="dp-option-row" onclick="toggleDpTimeInput()">
+                    <div class="dp-option-row">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                      <span class="dp-option-label">时间</span>
-                      <span class="dp-option-value" id="dp-time-value"></span>
-                      <span class="dp-option-arrow">›</span>
+                      <label class="dp-option-label" for="dp-time-input">时间</label>
+                      <input type="time" id="dp-time-input" step="60" aria-label="截止时间" onchange="updateDpTime(this.value)">
                     </div>
                     <div class="dp-option-row">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
-                      <span class="dp-option-label">提醒</span>
-                      <span class="dp-option-arrow">›</span>
+                      <label class="dp-option-label" for="dp-reminder-select">提醒</label>
+                      <select id="dp-reminder-select" aria-label="提醒时间" onchange="updateDpReminder(this.value)">
+                        <option value="">不提醒</option>
+                        <option value="0">到期时</option>
+                        <option value="5">提前 5 分钟</option>
+                        <option value="15">提前 15 分钟</option>
+                        <option value="30">提前 30 分钟</option>
+                        <option value="60">提前 1 小时</option>
+                      </select>
                     </div>
                     <div class="dp-option-row">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>
-                      <span class="dp-option-label">重复</span>
-                      <span class="dp-option-arrow">›</span>
+                      <label class="dp-option-label" for="dp-repeat-select">重复</label>
+                      <select id="dp-repeat-select" aria-label="重复周期" onchange="updateDpRepeat(this.value)">
+                        <option value="">不重复</option>
+                        <option value="daily">每天</option>
+                        <option value="weekly">每周</option>
+                        <option value="monthly">每月</option>
+                      </select>
                     </div>
                   </div>
+                  <p class="dp-reminder-note">网页关闭后提醒需登录并开启云同步，且在本设备授权通知。</p>
                 </div>
                 <!-- Period tab content -->
                 <div class="dp-tab-content" id="dp-tab-period" style="display:none">
@@ -217,6 +229,7 @@
                 </div>
                 <div class="dp-footer">
                   <button class="dp-btn dp-btn-clear" onclick="dpClear()">清除</button>
+                  <button class="dp-btn dp-btn-cancel" onclick="dpCancel()">取消</button>
                   <button class="dp-btn dp-btn-confirm" onclick="dpConfirm()">确定</button>
                 </div>
               </div>
@@ -411,6 +424,19 @@
     <!-- Settings -->
     <div class="page" id="page-settings" role="tabpanel">
       <div class="settings-section">
+        <h3><svg class="icon-svg" viewBox="0 0 24 24" style="color:var(--primary)"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M10 21h4"/></svg> 网页关闭后提醒</h3>
+        <p>提醒会发送到当前浏览器和设备。开启前需要登录并完成云端同步，也需要允许浏览器通知。推送只显示通用提示，不包含待办内容；每台设备需单独开启。</p>
+        <div class="push-reminder-status" id="push-reminder-status" role="status" aria-live="polite">
+          <span class="push-reminder-status-dot" aria-hidden="true"></span>
+          <span id="push-reminder-status-text">正在检查此设备的通知能力…</span>
+        </div>
+        <div class="settings-actions push-reminder-actions">
+          <button class="btn btn-primary" id="push-reminder-enable" type="button" onclick="enableBackgroundReminders()">开启本设备提醒</button>
+          <button class="btn btn-secondary" id="push-reminder-disable" type="button" onclick="disableBackgroundReminders()" hidden>关闭本设备提醒</button>
+        </div>
+        <p class="push-reminder-note">你可以随时在这里关闭本设备提醒，也可以在浏览器的网站通知设置中撤销权限。</p>
+      </div>
+      <div class="settings-section">
         <h3><svg class="icon-svg" viewBox="0 0 24 24" style="color:var(--primary)"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> 导出数据</h3>
         <p>将所有数据（待办、OKR、知识库、热力图数据）导出为 JSON 文件，随时备份你的所有记录。</p>
         <div class="settings-actions">
@@ -494,6 +520,8 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="task-features.js"></script>
+<script src="push-client.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

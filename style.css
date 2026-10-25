@@ -427,6 +427,11 @@ overflow: hidden; transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
   box-shadow: var(--shadow-lg); width: 320px; overflow: hidden;
 }
 .todo-datepicker.open { display: block; }
+.todo-datepicker.edit-mode {
+  position: fixed; top: 50%; left: 50%; right: auto; z-index: 10000;
+  width: min(360px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+  overflow-y: auto; transform: translate(-50%, -50%);
+}
 
 /* Tabs */
 .dp-tabs {
@@ -494,16 +499,29 @@ overflow: hidden; transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
 /* Options rows */
 .dp-options { border-top: 1px solid var(--border-light); }
 .dp-option-row {
-  display: flex; align-items: center; gap: 10px; padding: 12px 16px;
-  font-size: 13px; color: var(--text); cursor: pointer; transition: all var(--transition);
+  display: flex; align-items: center; gap: 10px; padding: 8px 16px;
+  font-size: 13px; color: var(--text); transition: all var(--transition);
   border-bottom: 1px solid var(--border-light);
 }
 .dp-option-row:last-child { border-bottom: none; }
-.dp-option-row:hover { background: var(--surface-alt); }
+.dp-option-row:focus-within { background: var(--surface-alt); }
 .dp-option-row svg { width: 18px; height: 18px; color: var(--text-secondary); flex-shrink: 0; }
 .dp-option-row .dp-option-label { flex: 1; }
 .dp-option-row .dp-option-value { color: var(--text-tertiary); font-size: 12px; }
 .dp-option-row .dp-option-arrow { color: var(--text-tertiary); font-size: 14px; }
+.dp-option-row input[type="time"],
+.dp-option-row select {
+  width: 142px; max-width: 56%; min-height: 36px; padding: 6px 9px;
+  color: var(--text); background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); font: inherit; font-variant-numeric: tabular-nums;
+}
+.dp-option-row input[type="time"] { width: 120px; }
+.dp-option-row select { cursor: pointer; }
+.dp-option-row input:disabled,
+.dp-option-row select:disabled { color: var(--text-tertiary); cursor: not-allowed; opacity: .65; }
+.dp-option-row input:focus-visible,
+.dp-option-row select:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.dp-reminder-note { margin: 0; padding: 8px 16px; color: var(--text-tertiary); font-size: 11px; line-height: 1.5; }
 
 /* Footer */
 .dp-footer {
@@ -515,6 +533,8 @@ overflow: hidden; transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
 }
 .dp-btn-clear { background: var(--surface-alt); color: var(--text-secondary); }
 .dp-btn-clear:hover { background: var(--border); color: var(--text); }
+.dp-btn-cancel { background: var(--surface); color: var(--text-secondary); border: 1px solid var(--border) !important; }
+.dp-btn-cancel:hover { background: var(--surface-alt); color: var(--text); }
 .dp-btn-confirm { background: var(--primary); color: #fff; }
 .dp-btn-confirm:hover { background: var(--primary-dark); }
 
@@ -562,6 +582,13 @@ overflow: hidden; transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
 .todo-meta .todo-date { color: var(--text-tertiary); }
 .todo-meta .todo-date.overdue { color: var(--error); }
 .todo-time { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.todo-schedule-edit {
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; border: none; border-radius: 6px; background: transparent;
+  color: var(--text-tertiary); cursor: pointer; opacity: .72; transition: all var(--transition);
+}
+.todo-schedule-edit svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.todo-item:hover .todo-schedule-edit, .todo-schedule-edit:focus-visible { opacity: 1; color: var(--primary); background: var(--primary-light); }
 .todo-delete {
   width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
   border-radius: 6px; color: var(--text-tertiary); font-size: 14px;
@@ -938,6 +965,25 @@ width: 100%;
 }
 .settings-section p { font-size: 13px; color: var(--text-secondary); margin-bottom: 18px; line-height: 1.7; }
 .settings-actions { display: flex; gap: 10px; }
+.push-reminder-status {
+  display: flex; align-items: flex-start; gap: 9px; padding: 12px 14px;
+  margin: 0 0 16px; border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm); background: var(--surface-alt);
+  color: var(--text-secondary); font-size: 13px; line-height: 1.55;
+}
+.push-reminder-status-dot {
+  width: 8px; height: 8px; margin-top: 5px; border-radius: 50%;
+  flex: 0 0 auto; background: var(--text-tertiary);
+}
+.push-reminder-status[data-state="enabled"] { color: var(--success); border-color: color-mix(in srgb, var(--success) 24%, var(--border-light)); }
+.push-reminder-status[data-state="enabled"] .push-reminder-status-dot { background: var(--success); }
+.push-reminder-status[data-state="denied"],
+.push-reminder-status[data-state="service_error"] { color: var(--error); border-color: color-mix(in srgb, var(--error) 24%, var(--border-light)); }
+.push-reminder-status[data-state="denied"] .push-reminder-status-dot,
+.push-reminder-status[data-state="service_error"] .push-reminder-status-dot { background: var(--error); }
+.push-reminder-actions [hidden] { display: none; }
+.push-reminder-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.push-reminder-note { margin-top: 14px; margin-bottom: 0 !important; font-size: 12px !important; color: var(--text-tertiary) !important; }
 
 /* ========== Tooltip ========== */
 .tooltip {
@@ -1038,6 +1084,18 @@ input[type="range"]::-webkit-slider-thumb {
   .todo-item { gap: 8px; padding-inline: 8px; }
   .todo-text { overflow-wrap: anywhere; }
   .todo-meta { gap: 4px; font-size: 11px; }
+  .todo-schedule-edit { opacity: 1; }
+  .todo-datepicker { right: 0; width: min(320px, calc(100vw - 24px)); }
+  .dp-option-row { gap: 8px; padding-inline: 12px; }
+  .dp-option-row input[type="time"] { width: 112px; }
+  .dp-option-row select { width: 138px; }
+}
+@media (max-width: 700px), (max-height: 740px) {
+  .todo-datepicker {
+    position: fixed; top: 50%; left: 50%; right: auto;
+    width: min(360px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+    overflow-y: auto; transform: translate(-50%, -50%);
+  }
 }
 
 /* ========== Auth Modal ========== */
