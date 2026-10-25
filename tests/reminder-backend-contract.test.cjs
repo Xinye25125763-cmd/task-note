@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.join(__dirname, '..');
+const userDataMigrationPath = path.join(root, 'supabase/migrations/20261024000000_user_data_rls.sql');
 const migrationPath = path.join(root, 'supabase/migrations/20261025000000_task_reminders.sql');
 const managePath = path.join(root, 'supabase/functions/manage-push-subscription/index.ts');
 const senderPath = path.join(root, 'supabase/functions/send-task-reminders/index.ts');
@@ -14,6 +15,14 @@ function readRequired(file, label) {
   assert.equal(fs.existsSync(file), true, `${label} exists`);
   return fs.readFileSync(file, 'utf8');
 }
+
+test('user_data grants cannot bypass row security with table-wide privileges', () => {
+  const sql = readRequired(userDataMigrationPath, 'user_data RLS migration').toLowerCase();
+
+  assert.match(sql, /revoke all on table public\.user_data from anon, authenticated/);
+  assert.match(sql, /grant select, insert, update, delete on table public\.user_data to authenticated/);
+  assert.doesNotMatch(sql, /grant all[^;]*to authenticated/s);
+});
 
 test('migration creates private RLS-protected reminder and subscription tables', () => {
   const sql = readRequired(migrationPath, 'task reminder migration').toLowerCase();
@@ -35,6 +44,7 @@ test('user_data trigger schedules only valid incomplete reminders in the task ti
   assert.match(sql, /security definer/);
   assert.match(sql, /set search_path\s*=\s*pg_catalog, public/);
   assert.match(sql, /after insert or update of data or delete on public\.user_data/);
+  assert.match(sql, /create trigger task_reminders_from_user_data[\s\S]*?for each row execute function public\.refresh_task_reminders_from_user_data\(\);\s*(?:--[^\n]*\s*)?update public\.user_data set data = data;/);
   assert.match(sql, /jsonb_array_elements/);
   assert.match(sql, /pg_timezone_names/);
   assert.match(sql, /0\|5\|15\|30\|60/);

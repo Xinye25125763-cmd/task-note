@@ -155,6 +155,9 @@ create trigger task_reminders_from_user_data
 after insert or update of data or delete on public.user_data
 for each row execute function public.refresh_task_reminders_from_user_data();
 
+-- Materialize reminders for tasks that were already saved before this migration.
+update public.user_data set data = data;
+
 -- Do not let a caller claim another account's existing browser endpoint.
 create or replace function public.register_push_subscription(
   p_user_id uuid,

@@ -10,7 +10,7 @@ alter table public.user_data enable row level security;
 
 -- This table contains private user data and is only accessed by signed-in
 -- clients. Service-role access remains governed by Supabase's service role.
-revoke all on table public.user_data from anon;
+revoke all on table public.user_data from anon, authenticated;
 grant select, insert, update, delete on table public.user_data to authenticated;
 
 -- Policies are permissive by default, so keep these names stable and replace
