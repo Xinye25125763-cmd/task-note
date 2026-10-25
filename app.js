@@ -1754,7 +1754,10 @@ function updateSidebarCounts() {
 }
 
 function updateBadge() {
-  document.getElementById('todo-badge').textContent = data.todos.filter(t => !t.done && t.date===today()).length;
+  const badge = document.getElementById('todo-badge');
+  const count = data.todos.filter(t => !t.done && t.date===today()).length;
+  badge.textContent = count;
+  badge.hidden = count === 0;
 }
 
 // ================================================================
