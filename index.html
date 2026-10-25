@@ -471,6 +471,28 @@
   </div>
 </div>
 
+<div class="sync-loading-overlay" id="sync-loading-overlay" role="status" aria-live="polite" tabindex="-1">
+  <div class="sync-loading-card">
+    <span class="sync-loading-spinner" aria-hidden="true"></span>
+    <p>正在核对本地与云端数据…</p>
+  </div>
+</div>
+
+<!-- Sync conflict modal -->
+<div class="sync-conflict-overlay" id="sync-conflict-overlay" role="dialog" aria-modal="true" aria-labelledby="sync-conflict-title" aria-describedby="sync-conflict-description">
+  <section class="sync-conflict-modal">
+    <div class="sync-conflict-icon" aria-hidden="true">!</div>
+    <h2 id="sync-conflict-title">发现两份不同的数据</h2>
+    <p class="sync-conflict-description" id="sync-conflict-description">本地和云端内容不一致。请选择要继续使用的版本；覆盖前会先下载另一份完整备份。</p>
+    <p class="sync-conflict-summary" id="sync-conflict-summary" aria-live="polite"></p>
+    <div class="sync-conflict-actions">
+      <button class="btn btn-primary" id="sync-conflict-use-local" type="button">使用本地版本</button>
+      <button class="btn btn-secondary" id="sync-conflict-use-cloud" type="button">使用云端版本</button>
+    </div>
+    <p class="sync-conflict-note">每个按钮都会先下载另一份 JSON 备份，再应用你的选择。</p>
+  </section>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="app.js"></script>
 </body>

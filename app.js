@@ -29,15 +29,17 @@ const OKR_ICONS_KEYS = ['okr_target','okr_rocket','okr_bulb','okr_chart','okr_st
 //  (Row Level Security must be enabled in Supabase dashboard).
 //  For production, consider using environment variables via a build step.
 // ================================================================
-const SUPABASE_URL = 'https://pvnhxijfvjidfudqvyzl.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2bmh4aWpmdmppZGZ1ZHF2eXpsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU1OTE5NjIsImV4cCI6MjEwMTE2Nzk2Mn0.jVbhFo7FnPSTv5dZLcT7gJLLUaL0Vd7uh8y7llwEo5M';
+const SUPABASE_URL = 'https://guplutkrbjsauqijdiia.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_fOjUcHdm0cugFPulbcxGHw_wZ5JtUjV';
 let supa = null;
 let currentUser = null;
 let saveTimer = null;
 let localSaveTimer = null;
+let cloudWriteQueue = Promise.resolve();
+let syncResolutionPending = false;
 
 try {
-  supa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  supa = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 } catch(e) {
   console.warn('Supabase init failed:', e);
   // Defer toast — DOM may not be ready yet
@@ -51,6 +53,8 @@ try {
 // ================================================================
 const STORAGE_KEY = 'tasknote_data';
 const DATA_VERSION = 2; // Increment when schema changes; migration runs on load
+let localDataLoadError = null;
+let localDataOriginalRaw = null;
 
 function getDefaultData() {
   return { version: DATA_VERSION, todos: [], okrs: [], notes: [], categories: [], heatmap: {}, nextId: 1 };
@@ -60,18 +64,93 @@ function getDefaultData() {
  * Migrate data to current DATA_VERSION.
  * Each case upgrades from version N to N+1.
  */
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function validateTaskNoteData(candidate) {
+  if (!isPlainObject(candidate)) return { ok: false, error: '根数据必须是 JSON 对象' };
+  const version = candidate.version === undefined ? 1 : candidate.version;
+  if (!Number.isInteger(version) || version < 1) return { ok: false, error: '数据版本无效' };
+  if (version > DATA_VERSION) return { ok: false, error: '文件来自较新版本的 TaskNote，请先升级应用' };
+
+  for (const key of ['todos', 'okrs', 'notes']) {
+    if (!Array.isArray(candidate[key])) return { ok: false, error: `${key} 必须是数组` };
+  }
+  if (candidate.categories !== undefined && !Array.isArray(candidate.categories)) {
+    return { ok: false, error: 'categories 必须是数组' };
+  }
+  if (candidate.heatmap !== undefined && !isPlainObject(candidate.heatmap)) {
+    return { ok: false, error: 'heatmap 必须是对象' };
+  }
+  if (candidate.nextId !== undefined && (!Number.isSafeInteger(candidate.nextId) || candidate.nextId < 1)) {
+    return { ok: false, error: 'nextId 必须是正整数' };
+  }
+
+  const validateRecords = (records, label) => {
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      if (!isPlainObject(record)) return `${label}[${i}] 必须是对象`;
+      if (!Number.isSafeInteger(record.id) || record.id < 1 || record.id >= Number.MAX_SAFE_INTEGER) {
+        return `${label}[${i}] 缺少有效的数字 ID`;
+      }
+    }
+    return null;
+  };
+
+  for (const [key, label] of [['todos', '待办'], ['okrs', 'OKR'], ['notes', '笔记'], ['categories', '分类']]) {
+    const error = validateRecords(candidate[key] || [], label);
+    if (error) return { ok: false, error };
+  }
+  if (candidate.todos.some(todo => typeof todo.text !== 'string')) {
+    return { ok: false, error: '每条待办都必须包含文本' };
+  }
+  if (candidate.okrs.some(okr => typeof okr.objective !== 'string')) {
+    return { ok: false, error: '每个 OKR 都必须包含目标文本' };
+  }
+  if (candidate.notes.some(note => typeof note.title !== 'string' || typeof note.content !== 'string')) {
+    return { ok: false, error: '每篇笔记都必须包含标题和正文文本' };
+  }
+  if (candidate.categories?.some(category => typeof category.name !== 'string')) {
+    return { ok: false, error: '每个分类都必须包含名称' };
+  }
+  for (let i = 0; i < candidate.okrs.length; i++) {
+    const krs = candidate.okrs[i].krs;
+    if (krs !== undefined && !Array.isArray(krs)) return { ok: false, error: `OKR[${i}].krs 必须是数组` };
+    const error = validateRecords(krs || [], `OKR[${i}].krs`);
+    if (error) return { ok: false, error };
+    if ((krs || []).some(kr => typeof kr.text !== 'string')) {
+      return { ok: false, error: `OKR[${i}] 的关键结果必须包含文本` };
+    }
+  }
+  for (let i = 0; i < candidate.notes.length; i++) {
+    const tags = candidate.notes[i].tags;
+    if (tags !== undefined && (!Array.isArray(tags) || tags.some(tag => typeof tag !== 'string'))) {
+      return { ok: false, error: `笔记[${i}].tags 必须是字符串数组` };
+    }
+  }
+  return { ok: true, version };
+}
+
 function migrateData(d) {
-  const v = d.version || 1;
+  const validation = validateTaskNoteData(d);
+  if (!validation.ok) throw new Error(validation.error);
+
+  const migrated = cloneDataSnapshot(d);
+  if (!migrated) throw new Error('无法复制数据');
+  const v = validation.version;
 
   // v1 → v2: add flag to todos, ensure note fields, add categories
   if (v < 2) {
-    if (!d.categories) d.categories = [];
-    d.notes.forEach(n => {
+    if (!migrated.categories) migrated.categories = [];
+    migrated.notes.forEach(n => {
       if (n.pinned === undefined) n.pinned = false;
       if (n.starred === undefined) n.starred = false;
       if (n.categoryId === undefined) n.categoryId = null;
     });
-    d.todos.forEach(t => {
+    migrated.todos.forEach(t => {
       if (t.flag === undefined) {
         if (t.urgent && t.important) t.flag = 1;
         else if (t.urgent || t.important) t.flag = 2;
@@ -82,10 +161,27 @@ function migrateData(d) {
     });
   }
 
+  // Keep optional containers and fields safe for renderers across old backups.
+  if (!migrated.categories) migrated.categories = [];
+  if (!migrated.heatmap) migrated.heatmap = {};
+  migrated.okrs.forEach(okr => { if (!Array.isArray(okr.krs)) okr.krs = []; });
+  migrated.notes.forEach(note => {
+    if (!Array.isArray(note.tags)) note.tags = [];
+    if (note.pinned === undefined) note.pinned = false;
+    if (note.starred === undefined) note.starred = false;
+    if (note.categoryId === undefined) note.categoryId = null;
+  });
+  let maxId = 0;
+  [...migrated.todos, ...migrated.okrs, ...migrated.notes, ...migrated.categories].forEach(item => {
+    maxId = Math.max(maxId, item.id);
+    (item.krs || []).forEach(kr => { maxId = Math.max(maxId, kr.id); });
+  });
+  if (!Number.isSafeInteger(migrated.nextId) || migrated.nextId <= maxId) migrated.nextId = maxId + 1;
+
   // Future migrations: if (v < 3) { ... }
 
-  d.version = DATA_VERSION;
-  return d;
+  migrated.version = DATA_VERSION;
+  return migrated;
 }
 
 function loadData() {
@@ -93,47 +189,155 @@ function loadData() {
     const r = localStorage.getItem(STORAGE_KEY);
     if (r) {
       const d = JSON.parse(r);
-      return migrateData(d);
+      const migrated = migrateData(d);
+      localDataLoadError = null;
+      localDataOriginalRaw = null;
+      return migrated;
     }
+    localDataLoadError = null;
+    localDataOriginalRaw = null;
   } catch(e) {
     console.error('Failed to load local data:', e);
-    if (typeof showToast === 'function') showToast('本地数据读取失败，已重置为默认数据', 'error', 5000);
+    localDataLoadError = e;
+    try { localDataOriginalRaw = localStorage.getItem(STORAGE_KEY); } catch(_) { localDataOriginalRaw = null; }
+    if (typeof showToast === 'function') showToast('本地数据无法读取，原始内容已保留；请先导出备份、导入有效文件或清空数据', 'error', 6000);
   }
   return getDefaultData();
 }
 
-function saveData() {
-  // Debounce localStorage writes to avoid excessive I/O on every keystroke
-  clearTimeout(localSaveTimer);
-  localSaveTimer = setTimeout(() => {
+function cloneDataSnapshot(snapshot) {
+  try {
+    return JSON.parse(JSON.stringify(snapshot));
+  } catch(e) {
+    console.error('Failed to snapshot data:', e);
+    return null;
+  }
+}
+
+function writeLocalNow(snapshot) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
       localStorage.setItem('tasknote_last_save', Date.now().toString());
     } catch(e) {
-      console.error('Local save failed:', e);
-      if (typeof showToast === 'function') showToast('本地保存失败，请检查浏览器存储空间', 'error', 5000);
+      console.warn('Local save timestamp failed:', e);
     }
+    return { ok: true };
+  } catch(e) {
+    console.error('Local save failed:', e);
+    return { ok: false, error: e };
+  }
+}
+
+async function writeCloudNow(snapshot, userId) {
+  if (!supa || !userId) return { ok: false, error: new Error('云端同步不可用') };
+  const request = cloudWriteQueue.then(async () => {
+    try {
+      const { error } = await supa.from('user_data').upsert({
+        user_id: userId,
+        data: snapshot,
+        updated_at: new Date().toISOString()
+      });
+      if (error) return { ok: false, error };
+      return { ok: true };
+    } catch(e) {
+      return { ok: false, error: e };
+    }
+  });
+  cloudWriteQueue = request.then(() => undefined, () => undefined);
+  return request;
+}
+
+function saveData() {
+  if (localDataLoadError) {
+    showToast('本地数据格式异常，保存已暂停；请先导出备份、导入有效文件或清空数据', 'error', 6000);
+    return;
+  }
+  const snapshot = cloneDataSnapshot(data);
+  if (!snapshot) {
+    showToast('无法准备数据保存，请刷新前先导出备份', 'error', 5000);
+    return;
+  }
+
+  const userId = currentUser && supa && !syncResolutionPending ? currentUser.id : null;
+  let localResult = null;
+
+  // Debounce localStorage writes to avoid excessive I/O on every keystroke.
+  clearTimeout(localSaveTimer);
+  localSaveTimer = setTimeout(() => {
+    localResult = writeLocalNow(snapshot);
+    if (!localResult.ok && !userId) showToast('本地保存失败，请检查浏览器存储空间', 'error', 5000);
   }, 300);
 
-  // Debounce cloud sync
-  if (currentUser && supa) {
-    clearTimeout(saveTimer);
+  // Capture both the data and account at scheduling time so a later auth
+  // change cannot send this snapshot under a different account.
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  if (userId) {
     showSyncIndicator(true);
-    saveTimer = setTimeout(async () => {
-      try {
-        await supa.from('user_data').upsert({
-          user_id: currentUser.id,
-          data: data,
-          updated_at: new Date().toISOString()
-        });
-        showSyncIndicator(false);
-      } catch(e) {
-        console.warn('Cloud save failed:', e);
-        showSyncIndicator(false);
-        showToast('云端同步失败，数据已保存到本地', 'error');
+    const timerId = setTimeout(async () => {
+      if (saveTimer === timerId) saveTimer = null;
+      // If timer throttling delayed the debounced local write, make one
+      // authoritative attempt before reporting local/cloud save outcomes.
+      if (!localResult) localResult = writeLocalNow(snapshot);
+      const result = await writeCloudNow(snapshot, userId);
+      if (currentUser?.id !== userId) return;
+      if (!result.ok) {
+        console.warn('Cloud save failed:', result.error);
+        if (!saveTimer) {
+          showSyncIndicator(false, '同步失败');
+          showToast(localResult.ok
+            ? '云端同步失败，数据已保存到本地'
+            : '本地保存与云端同步均失败，请检查存储空间和网络后重试', 'error');
+        }
+      } else {
+        if (!localResult.ok) showToast('云端同步成功，但本地保存失败，请检查浏览器存储空间', 'error', 5000);
+        if (!saveTimer) showSyncIndicator(false);
       }
     }, 800);
+    saveTimer = timerId;
   }
+}
+
+async function flushSave() {
+  clearTimeout(localSaveTimer);
+  localSaveTimer = null;
+  clearTimeout(saveTimer);
+  saveTimer = null;
+
+  if (localDataLoadError) {
+    return { local: false, cloud: null, error: localDataLoadError };
+  }
+
+  const snapshot = cloneDataSnapshot(data);
+  if (!snapshot) {
+    return { local: false, cloud: null, error: new Error('无法准备数据快照') };
+  }
+
+  const localResult = writeLocalNow(snapshot);
+  if (!localResult.ok) {
+    showToast('本地保存失败，操作已取消以保护当前数据', 'error', 5000);
+    if (currentUser) showSyncIndicator(false, '本地保存失败');
+    return { local: false, cloud: null, error: localResult.error };
+  }
+
+  if (!currentUser || !supa || syncResolutionPending) {
+    return { local: true, cloud: { ok: true, skipped: true }, snapshot };
+  }
+
+  const userId = currentUser.id;
+  showSyncIndicator(true);
+  const cloudResult = await writeCloudNow(snapshot, userId);
+  if (currentUser?.id === userId) {
+    if (cloudResult.ok) {
+      showSyncIndicator(false);
+    } else {
+      console.warn('Cloud save failed:', cloudResult.error);
+      showSyncIndicator(false, '同步失败');
+      showToast('本地已保存，但云端同步失败，请检查网络后重试', 'error', 5000);
+    }
+  }
+  return { local: true, cloud: cloudResult, snapshot };
 }
 
 let data = loadData();
@@ -144,54 +348,241 @@ function genId() { return data.nextId++; }
 // ================================================================
 let authMode = 'login';
 
-async function loadCloudData() {
-  if (!supa || !currentUser) return null;
+function readLocalSnapshot() {
+  let raw;
   try {
-    const { data: row, error } = await supa.from('user_data')
-      .select('data').eq('user_id', currentUser.id).single();
-    if (error && error.code !== 'PGRST116') throw error;
-    return row ? row.data : null;
-    } catch(e) {
-    console.warn('Cloud load failed:', e);
-    showToast('云端数据加载失败，请检查网络连接', 'error');
-    return null;
+    raw = localStorage.getItem(STORAGE_KEY);
+  } catch(e) {
+    return { exists: true, error: e };
+  }
+  if (raw === null) {
+    localDataLoadError = null;
+    localDataOriginalRaw = null;
+    return { exists: false, data: getDefaultData() };
+  }
+
+  try {
+    const data = migrateData(JSON.parse(raw));
+    localDataLoadError = null;
+    localDataOriginalRaw = null;
+    return { exists: true, data };
+  } catch(e) {
+    return { exists: true, error: e };
   }
 }
 
-async function syncLocalToCloud() {
-  if (!supa || !currentUser) return null;
+function stableSerialize(value) {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function downloadSnapshot(snapshot, source) {
+  let objectUrl = null;
+  let anchor = null;
   try {
-    const localData = loadData();
-    const { data: row, error } = await supa.from('user_data')
-      .select('data, updated_at').eq('user_id', currentUser.id).single();
-
-    if (error && error.code !== 'PGRST116') throw error;
-
-    if (!row) {
-      // No cloud data yet — push local
-      await supa.from('user_data').upsert({
-        user_id: currentUser.id,
-        data: localData,
-        updated_at: new Date().toISOString()
-      });
-      return localData;
-    }
-
-    const cloudData = row.data;
-    const cloudTime = new Date(row.updated_at).getTime();
-    const localTime = parseInt(localStorage.getItem('tasknote_last_save') || '0', 10);
-
-    // Conflict detection: if cloud is newer than last local save, cloud wins
-    if (cloudTime > localTime && localTime > 0) {
-      showToast('检测到云端有更新的数据，已自动同步', 'info', 4000);
-      return migrateData(cloudData);
-    }
-
-    return cloudData;
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+    objectUrl = URL.createObjectURL(blob);
+    anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = `tasknote_conflict_backup_${source}_${today()}.json`;
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    return true;
   } catch(e) {
-    console.warn('Sync failed:', e);
-    showToast('数据同步失败，请稍后重试', 'error');
-    return null;
+    console.error('Conflict backup download failed:', e);
+    if (anchor?.parentNode) anchor.remove();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    return false;
+  }
+}
+
+function snapshotSummary(snapshot, label) {
+  return `${label}：${snapshot.todos.length} 个待办 · ${snapshot.okrs.length} 个 OKR · ${snapshot.notes.length} 篇笔记`;
+}
+
+function showSyncConflict(localSnapshot, cloudSnapshot, onChoice) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById('sync-conflict-overlay');
+    const summary = document.getElementById('sync-conflict-summary');
+    const localButton = document.getElementById('sync-conflict-use-local');
+    const cloudButton = document.getElementById('sync-conflict-use-cloud');
+    let busy = false;
+
+    summary.textContent = `${snapshotSummary(localSnapshot, '本地')}` +
+      `\n${snapshotSummary(cloudSnapshot, '云端')}`;
+
+    const choose = async choice => {
+      if (busy) return;
+      busy = true;
+      localButton.disabled = true;
+      cloudButton.disabled = true;
+      try {
+        const result = await onChoice(choice);
+        if (result?.ok) {
+          overlay.classList.remove('show');
+          setPageInteractionBlocked(null);
+          resolve(result);
+          return;
+        }
+      } catch(e) {
+        console.error('Conflict resolution failed:', e);
+        showToast('处理数据冲突失败，请重试', 'error', 5000);
+      }
+      busy = false;
+      localButton.disabled = false;
+      cloudButton.disabled = false;
+    };
+
+    localButton.onclick = () => { void choose('local'); };
+    cloudButton.onclick = () => { void choose('cloud'); };
+    setPageInteractionBlocked('sync-conflict-overlay');
+    overlay.classList.add('show');
+    localButton.focus();
+  });
+}
+
+async function reconcileCloudData(userId) {
+  const localState = readLocalSnapshot();
+  if (localState.error) {
+    console.warn('Local snapshot is invalid:', localState.error);
+    showToast('本地数据无法验证，云端同步已暂停以避免覆盖数据', 'error', 6000);
+    return { ok: false, error: localState.error };
+  }
+
+  let row;
+  try {
+    const { data: cloudRow, error } = await supa.from('user_data')
+      .select('data').eq('user_id', userId).maybeSingle();
+    if (error) throw error;
+    row = cloudRow;
+  } catch(e) {
+    console.warn('Cloud load failed:', e);
+    showToast('云端数据加载失败，同步已暂停以保护现有数据', 'error', 6000);
+    return { ok: false, error: e };
+  }
+
+  const localSnapshot = localState.data;
+  if (!row) {
+    const writeResult = await writeCloudNow(localSnapshot, userId);
+    if (!writeResult.ok) {
+      console.warn('Initial cloud save failed:', writeResult.error);
+      showToast('本地数据保留成功，但首次云端保存失败', 'error', 6000);
+      return { ok: false, error: writeResult.error };
+    }
+    return { ok: true, data: localSnapshot, cloudOk: true };
+  }
+
+  let cloudSnapshot;
+  try {
+    cloudSnapshot = migrateData(row.data);
+  } catch(e) {
+    console.warn('Cloud snapshot is invalid:', e);
+    showToast('云端数据格式异常，云端同步已暂停以保护现有数据', 'error', 6000);
+    return { ok: false, error: e };
+  }
+
+  if (!localState.exists) return { ok: true, data: cloudSnapshot, cloudOk: true };
+  if (stableSerialize(localSnapshot) === stableSerialize(cloudSnapshot)) {
+    return { ok: true, data: cloudSnapshot, cloudOk: true };
+  }
+
+  syncResolutionPending = true;
+  showSyncLoading(false);
+  showSyncIndicator(false, '需要选择');
+  return showSyncConflict(localSnapshot, cloudSnapshot, async choice => {
+    const backup = choice === 'local' ? cloudSnapshot : localSnapshot;
+    const backupSource = choice === 'local' ? 'cloud' : 'local';
+    if (!downloadSnapshot(backup, backupSource)) {
+      showToast('备份文件创建失败，数据未覆盖，请重试', 'error', 6000);
+      return { ok: false };
+    }
+
+    const selectedSnapshot = choice === 'local' ? localSnapshot : cloudSnapshot;
+    const localResult = writeLocalNow(selectedSnapshot);
+    if (!localResult.ok) {
+      showToast('本地保存失败，冲突仍未解决，另一份数据未覆盖', 'error', 6000);
+      return { ok: false };
+    }
+
+    if (choice === 'local') {
+      const cloudResult = await writeCloudNow(selectedSnapshot, userId);
+      if (!cloudResult.ok) {
+        console.warn('Chosen local snapshot could not be uploaded:', cloudResult.error);
+        showToast('已保留本地版本并下载云端备份，但云端覆盖失败；请检查网络后重试', 'error', 6000);
+        return { ok: true, data: selectedSnapshot, cloudOk: false, localPersisted: true };
+      }
+    }
+    return { ok: true, data: selectedSnapshot, cloudOk: true, localPersisted: true };
+  });
+}
+
+let activeSyncUserId = null;
+let activeSyncPromise = null;
+let completedSyncUserId = null;
+let signOutAlreadyFlushed = false;
+
+async function syncCurrentUser() {
+  const userId = currentUser?.id;
+  if (!supa || !userId) return { ok: true, skipped: true };
+  if (activeSyncUserId === userId && activeSyncPromise) return activeSyncPromise;
+  if (completedSyncUserId === userId) return { ok: true, alreadySynced: true };
+
+  activeSyncUserId = userId;
+  const syncPromise = (async () => {
+    syncResolutionPending = true;
+    showSyncLoading(true);
+    showSyncIndicator(true);
+    let syncResult;
+    try {
+      syncResult = await reconcileCloudData(userId);
+    } catch(e) {
+      console.error('Data reconciliation failed:', e);
+      syncResult = { ok: false, error: e };
+    }
+    if (currentUser?.id !== userId) {
+      showSyncLoading(false);
+      return { ok: false, stale: true };
+    }
+    if (!syncResult?.ok) {
+      showSyncLoading(false);
+      showSyncIndicator(false, '同步失败');
+      showToast('云端核对未完成，同步已暂停；重新登录后可以重试', 'error', 6000);
+      return { ok: false };
+    }
+
+    data = syncResult.data;
+    if (!syncResult.localPersisted) {
+      const localResult = writeLocalNow(data);
+      if (!localResult.ok) {
+        showSyncLoading(false);
+        showSyncIndicator(false, '本地保存失败');
+        showToast('云端数据已读取，但写入本地失败，请检查浏览器存储空间', 'error', 5000);
+        return { ok: false, error: localResult.error };
+      }
+    }
+
+    syncResolutionPending = false;
+    completedSyncUserId = userId;
+    showSyncLoading(false);
+    showSyncIndicator(false, syncResult.cloudOk === false ? '同步失败' : null);
+    renderDashboard();
+    return { ok: syncResult.cloudOk !== false, cloudOk: syncResult.cloudOk };
+  })();
+  activeSyncPromise = syncPromise;
+
+  try {
+    return await syncPromise;
+  } finally {
+    if (activeSyncPromise === syncPromise) {
+      activeSyncPromise = null;
+      activeSyncUserId = null;
+    }
   }
 }
 
@@ -261,7 +652,23 @@ async function handleAuth() {
 
 async function handleLogout() {
   if (!confirm('确认登出？登出后数据将保存在本地。')) return;
-  await supa.auth.signOut();
+  showSyncLoading(true, '正在保存数据…');
+  try {
+    const saveResult = await flushSave();
+    if (!saveResult.local) {
+      showToast('本地保存失败，已取消登出以保护当前数据', 'error', 5000);
+      return;
+    }
+    signOutAlreadyFlushed = true;
+    const { error } = await supa.auth.signOut();
+    if (error) throw error;
+  } catch(e) {
+    console.warn('Sign out failed:', e);
+    showToast('登出失败，请稍后重试', 'error');
+  } finally {
+    signOutAlreadyFlushed = false;
+    showSyncLoading(false);
+  }
 }
 
 function updateSidebarUser() {
@@ -284,29 +691,73 @@ function updateSidebarUser() {
   }
 }
 
-async function onAuthChange(event, session) {
-  const wasLoggedIn = !!currentUser;
-  currentUser = session?.user || null;
-  
-  if (currentUser) {
-    if (!wasLoggedIn) {
-      showToast('登录成功，正在同步数据…', 'info');
-      showSyncIndicator(true);
-      const cloudData = await syncLocalToCloud();
-      if (cloudData) {
-data = migrateData(cloudData);
+function hasTaskNoteContent(snapshot) {
+  return !!(
+    snapshot?.todos?.length || snapshot?.okrs?.length || snapshot?.notes?.length ||
+    snapshot?.categories?.length || Object.keys(snapshot?.heatmap || {}).length ||
+    (Number(snapshot?.nextId) > 1)
+  );
 }
-      showSyncIndicator(false);
-      showToast('数据同步完成', 'success');
-    }
-  } else {
-    if (wasLoggedIn) {
-      data = loadData();
-      showToast('已退出登录', 'info');
-    }
+
+async function onAuthChange(event, session) {
+  const previousUser = currentUser;
+  const nextUser = session?.user || null;
+  const accountChanged = previousUser?.id && nextUser?.id && previousUser.id !== nextUser.id;
+  let flushResult = null;
+
+  let hasLocalSnapshot = false;
+  try {
+    hasLocalSnapshot = localStorage.getItem(STORAGE_KEY) !== null;
+  } catch(e) {
+    console.warn('Could not inspect local snapshot before auth change:', e);
+    hasLocalSnapshot = true;
   }
+  const needsPreviousSave = previousUser && (!nextUser || accountChanged) && !(!nextUser && signOutAlreadyFlushed);
+  if (needsPreviousSave) {
+    flushResult = await flushSave();
+  } else if (!previousUser && nextUser && hasLocalSnapshot) {
+    const storedSnapshot = readLocalSnapshot();
+    flushResult = storedSnapshot.error
+      ? { local: false, error: storedSnapshot.error }
+      : await flushSave();
+  } else if (!previousUser && nextUser && hasTaskNoteContent(data)) {
+    flushResult = await flushSave();
+  }
+
+  if (accountChanged || (!previousUser && nextUser && flushResult?.local === false)) {
+    // Do not let one account's in-memory data flow into a newly authenticated
+    // account if the transition could not be persisted safely.
+    currentUser = null;
+    completedSyncUserId = null;
+    updateSidebarUser();
+    renderDashboard();
+    showToast('账号切换前的数据未能安全保存，请先检查存储后再登录', 'error', 6000);
+    try {
+      const { error } = await supa.auth.signOut();
+      if (error) console.warn('Could not cancel account switch:', error);
+    } catch(e) {
+      console.warn('Could not cancel account switch:', e);
+    }
+    return;
+  }
+
+  currentUser = nextUser;
+  if (!nextUser) {
+    completedSyncUserId = null;
+    syncResolutionPending = false;
+    if (previousUser && flushResult?.local !== false) data = loadData();
+    if (previousUser) showToast('已退出登录', 'info');
+  } else if (!previousUser || accountChanged) {
+    completedSyncUserId = null;
+    showToast('正在同步数据…', 'info');
+  }
+
   updateSidebarUser();
   renderDashboard();
+  if (nextUser && (!previousUser || accountChanged)) {
+    const result = await syncCurrentUser();
+    if (result.ok) showToast('数据同步完成', 'success');
+  }
 }
 
 // Close auth modal on overlay click
@@ -360,12 +811,28 @@ function showToast(message, type = 'info', duration = 3000) {
 // ================================================================
 //  SYNC INDICATOR
 // ================================================================
-function showSyncIndicator(syncing) {
+function showSyncIndicator(syncing, statusText = null) {
   const el = document.getElementById('sync-indicator');
   if (!currentUser) { el.style.display = 'none'; return; }
   el.style.display = 'inline-flex';
   el.classList.toggle('syncing', syncing);
-  document.getElementById('sync-text').textContent = syncing ? '同步中…' : '已同步';
+  document.getElementById('sync-text').textContent = statusText || (syncing ? '同步中…' : '已同步');
+}
+
+function showSyncLoading(show, message = '正在核对本地与云端数据…') {
+  const overlay = document.getElementById('sync-loading-overlay');
+  if (!overlay) return;
+  const label = overlay.querySelector('p');
+  if (label) label.textContent = message;
+  overlay.classList.toggle('show', show);
+  setPageInteractionBlocked(show ? 'sync-loading-overlay' : null);
+  if (show) overlay.focus();
+}
+
+function setPageInteractionBlocked(activeOverlayId) {
+  Array.from(document.body.children).forEach(element => {
+    element.inert = !!activeOverlayId && element.id !== activeOverlayId;
+  });
 }
 
 // ================================================================
@@ -829,15 +1296,27 @@ function renderFlagIcon(flag, size) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="${c}" stroke="${c}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>`;
 }
 
+function isValidTodoDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const timestamp = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value;
+}
+
+function isValidTodoTime(value) {
+  return typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
+}
+
 function renderTodoItem(t) {
   const todayStr = today();
-  const isOverdue = !t.done && t.date < todayStr;
+  const isOverdue = !t.done && isValidTodoDate(t.date) && t.date < todayStr;
+  const dateLabel = t.date ? `<span class="todo-date${isOverdue?' overdue':''}">${escHtml(String(t.date))}</span>` : '';
+  const timeLabel = isValidTodoDate(t.date) && isValidTodoTime(t.time) ? `<span class="todo-time">${escHtml(t.time)}</span>` : '';
   return `<div class="todo-item ${t.done?'done':''}">
     <div class="todo-checkbox ${t.done?'checked':''}" onclick="toggleTodo(${t.id})">${t.done?ICONS.check:''}</div>
     <span class="todo-text">${escHtml(t.text)}</span>
     <span class="todo-flag-icon">${renderFlagIcon(t.flag)}</span>
     <span class="todo-meta">
-      <span class="todo-date${isOverdue?' overdue':''}">${t.date}</span>
+      ${dateLabel}${timeLabel}
     </span>
     <button class="todo-delete" onclick="deleteTodo(${t.id})">×</button>
   </div>`;
@@ -848,7 +1327,25 @@ function renderTodos() {
   const todos = getFilteredTodos();
   const sorted = [...todos].sort((a,b) => {
     if (a.done !== b.done) return a.done ? 1 : -1;
-    // Sort by flag priority: 1 > 2 > 3 > 4
+    if (a.done) return new Date(b.createdAt) - new Date(a.createdAt);
+
+    const aHasDate = isValidTodoDate(a.date);
+    const bHasDate = isValidTodoDate(b.date);
+    if (aHasDate !== bHasDate) return aHasDate ? -1 : 1;
+    if (aHasDate) {
+      const dateOrder = a.date.localeCompare(b.date);
+      if (dateOrder !== 0) return dateOrder;
+
+      const aHasTime = isValidTodoTime(a.time);
+      const bHasTime = isValidTodoTime(b.time);
+      if (aHasTime !== bHasTime) return aHasTime ? -1 : 1;
+      if (aHasTime) {
+        const timeOrder = a.time.localeCompare(b.time);
+        if (timeOrder !== 0) return timeOrder;
+      }
+    }
+
+    // Due date/time ties use flag priority: 1 > 2 > 3 > 4.
     const fa = a.flag || 4, fb = b.flag || 4;
     if (fa !== fb) return fa - fb;
     return new Date(b.createdAt) - new Date(a.createdAt);
@@ -859,8 +1356,8 @@ function renderTodos() {
   } else {
     // Group: overdue first, then active, then done
     const todayStr = today();
-    const overdue = sorted.filter(t => !t.done && t.date < todayStr);
-    const active = sorted.filter(t => !t.done && t.date >= todayStr);
+    const overdue = sorted.filter(t => !t.done && isValidTodoDate(t.date) && t.date < todayStr);
+    const active = sorted.filter(t => !t.done && (!isValidTodoDate(t.date) || t.date >= todayStr));
     const done = sorted.filter(t => t.done);
     let html = '';
     if (overdue.length > 0) {
@@ -1500,29 +1997,101 @@ function renderNoteList() {
 //  DATA MANAGEMENT
 // ================================================================
 function exportData() {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  if (localDataLoadError && localDataOriginalRaw === null) {
+    showToast('本地原始数据无法读取，当前无法生成备份文件', 'error', 6000);
+    return;
+  }
+  const content = localDataLoadError ? localDataOriginalRaw : JSON.stringify(data, null, 2);
+  const blob = new Blob([content], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = `tasknote_backup_${today()}.json`; a.click(); URL.revokeObjectURL(a.href);
+  a.download = `tasknote_${localDataLoadError ? 'raw_local_backup' : 'backup'}_${today()}.json`;
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+function rememberReloadNotice(message) {
+  try {
+    sessionStorage.setItem('tasknote_reload_notice', message);
+  } catch(e) {
+    console.warn('Could not preserve reload notice:', e);
+    showToast(message, 'error', 6000);
+  }
+}
+
+function showReloadNotice() {
+  try {
+    const message = sessionStorage.getItem('tasknote_reload_notice');
+    if (!message) return;
+    sessionStorage.removeItem('tasknote_reload_notice');
+    showToast(message, 'error', 6000);
+  } catch(e) {
+    console.warn('Could not read reload notice:', e);
+  }
 }
 
 function importData(event) {
-  const file = event.target.files[0]; if (!file) return;
+  const input = event.target;
+  const file = input.files[0]; if (!file) return;
   const reader = new FileReader();
-  reader.onload = function(e) {
+  reader.onload = async function(e) {
     try {
-      const imported = JSON.parse(e.target.result);
-      if (imported.todos && imported.okrs && imported.notes) {
-        if (confirm('导入将覆盖所有当前数据，确认继续？')) { data = imported; saveData(); location.reload(); }
-      } else alert('文件格式不正确');
+      const parsed = JSON.parse(e.target.result);
+      const validation = validateTaskNoteData(parsed);
+      if (!validation.ok) {
+        alert(`文件格式不正确：${validation.error}`);
+        return;
+      }
+      const imported = migrateData(parsed);
+      if (!confirm('导入将覆盖所有当前数据，确认继续？')) return;
+
+      const previousData = data;
+      const previousLoadError = localDataLoadError;
+      const previousRaw = localDataOriginalRaw;
+      showSyncLoading(true, '正在保存导入的数据…');
+      data = imported;
+      localDataLoadError = null;
+      localDataOriginalRaw = null;
+      const result = await flushSave();
+      if (!result.local) {
+        data = previousData;
+        localDataLoadError = previousLoadError;
+        localDataOriginalRaw = previousRaw;
+        showSyncLoading(false);
+        showToast('导入未写入本地数据，请检查存储空间后重试', 'error', 6000);
+        return;
+      }
+      if (result.cloud?.ok === false) {
+        rememberReloadNotice('导入数据已保存在本地，但云端同步失败；重新登录后可继续同步');
+      }
+      location.reload();
     } catch(err) { alert('文件解析失败：' + err.message); }
   };
+  reader.onerror = () => alert('文件读取失败，请重新选择文件');
   reader.readAsText(file); event.target.value = '';
 }
 
-function clearAllData() {
+async function clearAllData() {
   if (confirm('确认清除所有数据吗？此操作不可恢复！')) {
     if (confirm('再次确认：清除后数据无法恢复，建议先导出备份。继续清除？')) {
-      data = getDefaultData(); saveData(); location.reload();
+      const previousData = data;
+      const previousLoadError = localDataLoadError;
+      const previousRaw = localDataOriginalRaw;
+      showSyncLoading(true, '正在保存清空结果…');
+      data = getDefaultData();
+      localDataLoadError = null;
+      localDataOriginalRaw = null;
+      const result = await flushSave();
+      if (!result.local) {
+        data = previousData;
+        localDataLoadError = previousLoadError;
+        localDataOriginalRaw = previousRaw;
+        showSyncLoading(false);
+        showToast('清空未写入本地数据，请检查存储空间后重试', 'error', 6000);
+        return;
+      }
+      if (result.cloud?.ok === false) {
+        rememberReloadNotice('清空结果已保存在本地，但云端同步失败；重新登录后可继续同步');
+      }
+      location.reload();
     }
   }
 }
@@ -1691,20 +2260,19 @@ async function init() {
   // Setup Supabase auth
   if (supa) {
     supa.auth.onAuthStateChange((event, session) => {
-      onAuthChange(event, session);
+      void onAuthChange(event, session);
     });
     // Check existing session
-    const { data: { session } } = await supa.auth.getSession();
-    if (session) {
-      currentUser = session.user;
-            const cloudData = await loadCloudData();
-      if (cloudData) {
-        data = migrateData(cloudData);
-        renderDashboard();
-      }
+    const { data: { session }, error } = await supa.auth.getSession();
+    if (error) {
+      console.warn('Session load failed:', error);
+      showToast('登录状态读取失败，请刷新后重试', 'error', 5000);
+    } else if (session) {
+      await onAuthChange('INITIAL_SESSION', session);
     }
     updateSidebarUser();
   }
+  showReloadNotice();
 }
 
 init();
