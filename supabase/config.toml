@@ -4,4 +4,4 @@ project_id = "task-note"
 verify_jwt = true
 
 [functions.send-task-reminders]
-verify_jwt = false
+verify_jwt = true

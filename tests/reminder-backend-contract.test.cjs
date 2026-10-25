@@ -10,6 +10,7 @@ const managePath = path.join(root, 'supabase/functions/manage-push-subscription/
 const senderPath = path.join(root, 'supabase/functions/send-task-reminders/index.ts');
 const senderConfigPath = path.join(root, 'supabase/functions/send-task-reminders/deno.json');
 const supabaseConfigPath = path.join(root, 'supabase/config.toml');
+const deploymentGuidePath = path.join(root, 'docs/task-reminders-deployment.md');
 
 function readRequired(file, label) {
   assert.equal(fs.existsSync(file), true, `${label} exists`);
@@ -94,6 +95,7 @@ test('scheduled sender checks a separate cron secret and sends generic payloads'
   const config = readRequired(supabaseConfigPath, 'Supabase config');
   const packageConfig = JSON.parse(readRequired(senderConfigPath, 'sender dependency config'));
   const gitignore = readRequired(path.join(root, '.gitignore'), 'gitignore');
+  const deploymentGuide = readRequired(deploymentGuidePath, 'deployment guide');
 
   assert.match(source, /withSupabase\(\{\s*auth:\s*'none'\s*\}/);
   assert.match(source, /TASK_REMINDER_CRON_SECRET/);
@@ -104,7 +106,20 @@ test('scheduled sender checks a separate cron secret and sends generic payloads'
   assert.match(source, /有一项待办即将到期/);
   assert.doesNotMatch(source, /todo\.text|task\.text/);
   assert.match(config, /\[functions\.manage-push-subscription\][\s\S]*?verify_jwt\s*=\s*true/);
-  assert.match(config, /\[functions\.send-task-reminders\][\s\S]*?verify_jwt\s*=\s*false/);
+  assert.match(config, /\[functions\.send-task-reminders\][\s\S]*?verify_jwt\s*=\s*true/);
+  assert.match(deploymentGuide, /'Authorization',\s*'Bearer ' \|\|/);
+  assert.doesNotMatch(deploymentGuide, /--no-verify-jwt/);
   assert.match(JSON.stringify(packageConfig), /web-push@3\.6\.7/);
   assert.match(gitignore, /supabase\/functions\/\.env/);
+});
+
+test('deployment guide records manually applied production migrations before future pushes', () => {
+  const deploymentGuide = readRequired(deploymentGuidePath, 'deployment guide');
+
+  assert.match(deploymentGuide, /schema_migrations/);
+  assert.match(deploymentGuide, /create schema if not exists supabase_migrations/i);
+  assert.match(deploymentGuide, /insert into supabase_migrations\.schema_migrations/i);
+  assert.match(deploymentGuide, /alter table supabase_migrations\.schema_migrations enable row level security/i);
+  assert.match(deploymentGuide, /20261024000000[\s\S]*20261025000000/);
+  assert.match(deploymentGuide, /两个版本都显示为已应用以前，不要运行 `supabase db push`/);
 });

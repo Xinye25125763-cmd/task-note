@@ -23,9 +23,40 @@ supabase migration list
 
 `link` 会要求数据库密码；只在本机 Supabase CLI 提示中输入。执行 `migration list` 后确认目标项目正确，且没有尚未处理的历史迁移分歧。
 
+当前生产项目的两个仓库迁移已于 2026-10-25 通过 Dashboard SQL Editor 手动执行；检查时发现 `supabase_migrations.schema_migrations` 尚不存在。先按下一节登记这两个已应用版本，再使用 CLI 部署，避免 CLI 把相同 SQL 当成新迁移重复执行。
+
 ## 2. 预览并应用数据库迁移
 
 仓库中的迁移文件为 [`supabase/migrations/20261025000000_task_reminders.sql`](../supabase/migrations/20261025000000_task_reminders.sql)。先预览：
+
+当前生产项目先在 SQL Editor 初始化 CLI 迁移记录。这里仅登记两个已执行版本，不会再次执行迁移 SQL：
+
+```sql
+create schema if not exists supabase_migrations;
+
+create table if not exists supabase_migrations.schema_migrations (
+  version text primary key,
+  statements text[],
+  name text
+);
+
+alter table supabase_migrations.schema_migrations enable row level security;
+
+insert into supabase_migrations.schema_migrations (version, statements, name)
+values
+  ('20261024000000', array[]::text[], 'user_data_rls'),
+  ('20261025000000', array[]::text[], 'task_reminders')
+on conflict (version) do nothing;
+
+select version
+from supabase_migrations.schema_migrations
+where version in ('20261024000000', '20261025000000')
+order by version;
+```
+
+确认查询返回这两个版本后，`supabase migration list` 应把它们显示为已应用。**在两个版本都显示为已应用以前，不要运行 `supabase db push`。**
+
+若 SQL Editor 提示新表尚未启用 RLS，选择 **Run and enable RLS**。该表只存迁移版本元数据，不向浏览器客户端开放。
 
 ```sh
 supabase db push --dry-run
@@ -74,10 +105,10 @@ Supabase 会自动向 Edge Functions 注入项目 URL 和服务端密钥；不�
 
 ```sh
 supabase functions deploy manage-push-subscription --project-ref guplutkrbjsauqijdiia
-supabase functions deploy send-task-reminders --project-ref guplutkrbjsauqijdiia --no-verify-jwt
+supabase functions deploy send-task-reminders --project-ref guplutkrbjsauqijdiia
 ```
 
-第一个函数保留 JWT 校验，只能由已登录用户管理自己的设备订阅。第二个函数关闭平台 JWT 校验，但代码会要求 `x-task-reminder-secret` 与 `TASK_REMINDER_CRON_SECRET` 匹配；这个共享密钥不能放在网页端。配置见 [`supabase/config.toml`](../supabase/config.toml)。
+两个函数都保留 Supabase 网关的 JWT 校验。`manage-push-subscription` 还会验证当前登录用户，只能管理自己的设备订阅；`send-task-reminders` 另外要求 `x-task-reminder-secret` 与 `TASK_REMINDER_CRON_SECRET` 匹配。Cron 请求必须通过 Vault 同时带上 `apikey`、`Authorization: Bearer ...` 和独立的 `x-task-reminder-secret`。这些凭据都不能放在网页端。配置见 [`supabase/config.toml`](../supabase/config.toml)。
 
 在 Edge Functions 页面确认两个函数均已部署。可用 Supabase Dashboard Functions 日志检查启动错误；不要把完整 Push endpoint 或订阅密钥复制到公开日志/工单。
 
@@ -88,7 +119,7 @@ Dashboard → Database → Vault → Add Secret，创建以下名称：
 | Vault 名称 | 值 |
 | --- | --- |
 | `task_note_project_url` | `https://guplutkrbjsauqijdiia.supabase.co` |
-| `task_note_supabase_secret_key` | Dashboard → Settings → API Keys 中的 Secret key（不要用 Publishable key） |
+| `task_note_supabase_secret_key` | 已有的旧版 `service_role` JWT（不要用 Publishable key，也不要放入前端） |
 | `task_note_cron_secret` | 必须与 Edge Function secret `TASK_REMINDER_CRON_SECRET` 完全相同 |
 
 将 Secret key 放入 Vault，而不是 SQL 文本、Git 或浏览器。Supabase 文档说明 Vault 会加密保存 secret，并通过 `vault.decrypted_secrets` 在 SQL 中按需读取。
@@ -113,6 +144,11 @@ select cron.schedule(
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
         'apikey', (
+          select decrypted_secret
+          from vault.decrypted_secrets
+          where name = 'task_note_supabase_secret_key'
+        ),
+        'Authorization', 'Bearer ' || (
           select decrypted_secret
           from vault.decrypted_secrets
           where name = 'task_note_supabase_secret_key'
@@ -156,7 +192,7 @@ Supabase Dashboard → Authentication → URL Configuration：
 5. 点击通知应打开或聚焦 TaskNote。再回到设置中关闭提醒，确认本设备订阅已移除。
 6. 通过验收后，再把最新静态文件发布到公开 Site。通知授权、已登录账号和所有待办标题都留在用户的浏览器/Supabase 用户数据里；推送不广播给 Site 的其他访客。
 
-如果测试时函数返回 401，检查 `verify_jwt` 是否与两个函数的配置一致、`TASK_REMINDER_CRON_SECRET` 与 Vault 中的同名共享值是否相同，以及 Cron 请求是否带有 `apikey` 和 `x-task-reminder-secret` 两个头。若通知没有到达，先看 `cron.job_run_details`、Edge Function 日志和浏览器/操作系统通知设置。
+如果测试时函数返回 401，检查两个函数的 `verify_jwt = true` 配置，以及 Cron 请求是否从 Vault 读取正确的 JWT 并同时带有 `apikey`、`Authorization: Bearer ...` 和 `x-task-reminder-secret` 三个头。再确认 `TASK_REMINDER_CRON_SECRET` 与 Vault 中的同名共享值完全相同。若通知没有到达，先看 `cron.job_run_details`、Edge Function 日志和浏览器/操作系统通知设置。
 
 ## 官方参考
 
